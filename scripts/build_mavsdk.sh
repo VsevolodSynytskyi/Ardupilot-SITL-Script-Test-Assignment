@@ -22,6 +22,7 @@ cmake -S "$SRC/cpp" -B "$SRC/build" \
   -DBUILD_TESTING=OFF \
   -DBUILD_WITHOUT_CURL=ON \
   -DMAVLINK_DIALECT=ardupilotmega
-cmake --build "$SRC/build" -j"$(sysctl -n hw.ncpu)"
+JOBS="$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)"
+cmake --build "$SRC/build" -j"$JOBS"
 cmake --install "$SRC/build"
 echo "MAVSDK installed to $PREFIX"

@@ -14,12 +14,11 @@ A C++ program that controls the altitude of an ArduCopter in SITL using thrust c
 
 ## Quick start
 
-Requirements: Xcode Command Line Tools and Homebrew (macOS), Python 3.10+, CMake 3.20+.
+Requirements: a C++17 compiler, CMake 3.20+, Python 3.10+ (with venv; `python3-venv` on Ubuntu/Debian) and git. Runs on macOS and Linux; on Windows, use WSL2 with Ubuntu.
 
 Set up once, from the project root. The SITL build takes about 2 min and the MAVSDK build about 10 min:
 
 ```bash
-brew install cmake
 git clone --recurse-submodules --shallow-submodules --depth 1 https://github.com/ArduPilot/ardupilot.git ardupilot
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 source .venv/bin/activate

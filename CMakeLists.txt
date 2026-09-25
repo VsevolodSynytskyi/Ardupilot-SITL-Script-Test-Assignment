@@ -30,7 +30,7 @@ add_executable(altitude_control
 )
 target_link_libraries(altitude_control PRIVATE altctl_core MAVSDK::mavsdk)
 target_compile_options(altitude_control PRIVATE -Wall -Wextra)
-# Run-time lookup of the project-local libmavsdk.dylib
+# Run-time lookup of the project-local MAVSDK shared library
 set_target_properties(altitude_control PROPERTIES
   BUILD_RPATH "${CMAKE_CURRENT_SOURCE_DIR}/third_party/mavsdk-install/lib")
 
