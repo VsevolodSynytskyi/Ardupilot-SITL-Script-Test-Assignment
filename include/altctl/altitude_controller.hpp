@@ -6,8 +6,8 @@
 namespace altctl {
 
 // Cascade altitude controller:
-//   target -> setpoint trajectory (trapezoidal: rate, acceleration and braking limited)
-//   outer P:   climb_sp = ramp_rate + alt_kp * (setpoint - alt), clamped to climb/descent limits
+//   target -> setpoint trajectory (trapezoidal: speed, acceleration and braking limited)
+//   outer P:   climb setpoint = trajectory speed + alt_kp * (setpoint - alt), clamped
 //   inner PID: thrust correction from climb-rate error
 //   thrust = hover_thrust + correction, clamped to [thrust_min, thrust_max]
 // Take-off: until liftoff_alt_m above the ground, fixed thrust hover + takeoff_thrust_margin with
@@ -15,29 +15,31 @@ namespace altctl {
 class AltitudeController {
 public:
     struct Output {
-        double alt_setpoint_m = 0.0;   // after ramp
-        double climb_setpoint_ms = 0.0;
+        double setpoint_alt_m = 0.0;  // on the trajectory
+        double climb_setpoint_mps = 0.0;
         double thrust = 0.0;
         bool integrator_frozen = false;
-        PIDController::Terms vel_terms;
+        PidController::Terms velocity_pid_terms;
     };
 
-    AltitudeController(const Config& cfg, double hover_thrust);
+    AltitudeController(const Config& config, double hover_thrust);
 
     // Call on the ground before take-off: sets the ground reference, clears all state.
     void reset(double ground_alt_m);
 
-    Output update(double target_alt_m, double alt_m, double climb_ms, double dt);
-
+    [[nodiscard]] Output update(double target_alt_m, double alt_m, double climb_mps, double dt_s);
 
 private:
-    Config cfg_;
+    Output takeoff_output(double alt_m);
+    void advance_setpoint(double target_alt_m, double dt_s);
+
+    Config config_;
     double hover_thrust_;
-    double ramped_setpoint_m_ = 0.0;
-    double ramp_rate_ms_ = 0.0;  // current setpoint velocity (fed forward)
     double ground_alt_m_ = 0.0;
-    bool airborne_ = false;       // latched at liftoff
-    PIDController vel_pid_;
+    double setpoint_alt_m_ = 0.0;
+    double setpoint_speed_mps_ = 0.0;  // fed forward to the outer loop
+    bool airborne_ = false;            // latched at liftoff
+    PidController velocity_pid_;
 };
 
 }  // namespace altctl

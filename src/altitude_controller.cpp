@@ -5,79 +5,93 @@
 
 namespace altctl {
 
-AltitudeController::AltitudeController(const Config& cfg, double hover_thrust)
-    : cfg_(cfg), hover_thrust_(hover_thrust), vel_pid_(cfg.vel)
+AltitudeController::AltitudeController(const Config& config, double hover_thrust)
+    : config_(config), hover_thrust_(hover_thrust), velocity_pid_(config.velocity_pid)
 {
 }
 
 void AltitudeController::reset(double ground_alt_m)
 {
     ground_alt_m_ = ground_alt_m;
-    ramped_setpoint_m_ = ground_alt_m;
-    ramp_rate_ms_ = 0.0;
+    setpoint_alt_m_ = ground_alt_m;
+    setpoint_speed_mps_ = 0.0;
     airborne_ = false;
-    vel_pid_.reset();
+    velocity_pid_.reset();
 }
 
 AltitudeController::Output AltitudeController::update(double target_alt_m, double alt_m,
-                                                      double climb_ms, double dt)
+                                                      double climb_mps, double dt_s)
 {
-    Output out;
-    if (!(dt > 0.0)) {
-        dt = 0.0;
-    }
+    const double step_dt_s = dt_s > 0.0 ? dt_s : 0.0;
 
-    // Take-off phase: until the vehicle is liftoff_alt_m above the ground, command a fixed
-    // hover + margin (the thrust-only take-off validated in SITL; ~3 s of it is motor spool-up).
-    // The PID is kept reset, so nothing winds up on the ground.
-    if (!airborne_ && alt_m - ground_alt_m_ >= cfg_.liftoff_alt_m) {
+    if (!airborne_ && alt_m - ground_alt_m_ >= config_.liftoff_alt_m) {
         airborne_ = true;
         // bumpless hand-over: trajectory starts where the vehicle is, at its current speed
-        ramped_setpoint_m_ = alt_m;
-        ramp_rate_ms_ = std::clamp(climb_ms, -cfg_.setpoint_rate_down_ms, cfg_.setpoint_rate_up_ms);
+        setpoint_alt_m_ = alt_m;
+        setpoint_speed_mps_ =
+            std::clamp(climb_mps, -config_.setpoint_speed_down_mps, config_.setpoint_speed_up_mps);
     }
     if (!airborne_) {
-        vel_pid_.reset();
-        out.alt_setpoint_m = alt_m;
-        out.integrator_frozen = true;
-        out.thrust = std::clamp(hover_thrust_ + cfg_.takeoff_thrust_margin, cfg_.thrust_min,
-                                cfg_.thrust_max);
-        return out;
+        return takeoff_output(alt_m);
     }
 
-    // Setpoint trajectory: trapezoidal velocity profile (rate- and acceleration-limited, and
-    // braking with v <= sqrt(2*a*distance) so it arrives at the target with zero velocity).
-    // The profile velocity is fed forward so the outer loop does not lag the ramp.
-    const double remaining = target_alt_m - ramped_setpoint_m_;
-    const double rate_limit =
-        remaining >= 0.0 ? cfg_.setpoint_rate_up_ms : cfg_.setpoint_rate_down_ms;
-    const double v_brake = std::sqrt(2.0 * cfg_.setpoint_accel_mss * std::abs(remaining));
-    const double v_wanted = std::copysign(std::min(rate_limit, v_brake), remaining);
-    const double dv = cfg_.setpoint_accel_mss * dt;
-    // accelerate at most `dv` per tick; braking toward v_wanted is always allowed
-    if (std::abs(v_wanted) > std::abs(ramp_rate_ms_) && v_wanted * ramp_rate_ms_ >= 0.0) {
-        ramp_rate_ms_ = std::clamp(v_wanted, ramp_rate_ms_ - dv, ramp_rate_ms_ + dv);
-    } else {
-        ramp_rate_ms_ = v_wanted;
-    }
-    double step = ramp_rate_ms_ * dt;
-    if (std::abs(step) >= std::abs(remaining)) {  // do not pass the target
-        step = remaining;
-        ramp_rate_ms_ = 0.0;
-    }
-    ramped_setpoint_m_ += step;
-    out.alt_setpoint_m = ramped_setpoint_m_;
+    advance_setpoint(target_alt_m, step_dt_s);
 
+    Output output;
+    output.setpoint_alt_m = setpoint_alt_m_;
     // Outer loop: altitude -> climb rate
-    out.climb_setpoint_ms =
-        std::clamp(ramp_rate_ms_ + cfg_.alt_kp * (ramped_setpoint_m_ - alt_m),
-                   -cfg_.max_descent_ms, cfg_.max_climb_ms);
-
+    output.climb_setpoint_mps =
+        std::clamp(setpoint_speed_mps_ + config_.alt_kp * (setpoint_alt_m_ - alt_m),
+                   -config_.max_descent_mps, config_.max_climb_mps);
     // Inner loop: climb rate -> thrust correction around hover
-    const double correction = vel_pid_.update(out.climb_setpoint_ms, climb_ms, dt);
-    out.vel_terms = vel_pid_.terms();
-    out.thrust = std::clamp(hover_thrust_ + correction, cfg_.thrust_min, cfg_.thrust_max);
-    return out;
+    const double correction = velocity_pid_.update(output.climb_setpoint_mps, climb_mps, step_dt_s);
+    output.velocity_pid_terms = velocity_pid_.terms();
+    output.thrust = std::clamp(hover_thrust_ + correction, config_.thrust_min, config_.thrust_max);
+    return output;
+}
+
+// Take-off phase: a fixed hover + margin (the thrust-only take-off validated in SITL; ~3 s of it
+// is motor spool-up). The PID is kept reset, so nothing winds up on the ground.
+AltitudeController::Output AltitudeController::takeoff_output(double alt_m)
+{
+    velocity_pid_.reset();
+    Output output;
+    output.setpoint_alt_m = alt_m;
+    output.integrator_frozen = true;
+    output.thrust = std::clamp(hover_thrust_ + config_.takeoff_thrust_margin, config_.thrust_min,
+                               config_.thrust_max);
+    return output;
+}
+
+// Trapezoidal velocity profile: speed- and acceleration-limited, braking with
+// v <= sqrt(2*a*distance) so the setpoint arrives at the target with zero speed.
+void AltitudeController::advance_setpoint(double target_alt_m, double dt_s)
+{
+    const double remaining_m = target_alt_m - setpoint_alt_m_;
+    const double speed_limit_mps =
+        remaining_m >= 0.0 ? config_.setpoint_speed_up_mps : config_.setpoint_speed_down_mps;
+    const double braking_speed_mps =
+        std::sqrt(2.0 * config_.setpoint_accel_mps2 * std::abs(remaining_m));
+    const double desired_speed_mps =
+        std::copysign(std::min(speed_limit_mps, braking_speed_mps), remaining_m);
+    const double max_speed_change_mps = config_.setpoint_accel_mps2 * dt_s;
+
+    const bool speeding_up = std::abs(desired_speed_mps) > std::abs(setpoint_speed_mps_) &&
+                             desired_speed_mps * setpoint_speed_mps_ >= 0.0;
+    if (speeding_up) {
+        setpoint_speed_mps_ = std::clamp(desired_speed_mps, setpoint_speed_mps_ - max_speed_change_mps,
+                                         setpoint_speed_mps_ + max_speed_change_mps);
+    } else {
+        setpoint_speed_mps_ = desired_speed_mps;  // braking is never limited
+    }
+
+    const double step_m = setpoint_speed_mps_ * dt_s;
+    if (std::abs(step_m) >= std::abs(remaining_m)) {  // do not pass the target
+        setpoint_alt_m_ = target_alt_m;
+        setpoint_speed_mps_ = 0.0;
+    } else {
+        setpoint_alt_m_ += step_m;
+    }
 }
 
 }  // namespace altctl

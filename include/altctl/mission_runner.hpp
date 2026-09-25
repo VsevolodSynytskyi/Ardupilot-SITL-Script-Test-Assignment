@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <string>
 
 #include "altctl/config.hpp"
@@ -24,7 +25,7 @@ enum class MissionState {
     Error,
 };
 
-const char* to_string(MissionState s);
+const char* to_string(MissionState state);
 
 // Mission state machine + the fixed-rate control loop.
 //
@@ -39,27 +40,43 @@ const char* to_string(MissionState s);
 // failure mode found in SITL (ArduPilot applies the last thrust until GUID_TIMEOUT).
 class MissionRunner {
 public:
-    MissionRunner(const Config& cfg, DroneInterface& drone, DataLogger& logger,
+    static constexpr int kExitDone = 0;
+    static constexpr int kExitError = 1;
+    static constexpr int kExitReleasedToOperator = 3;
+    static constexpr int kExitInterrupted = 130;
+
+    MissionRunner(const Config& config, DroneInterface& drone, DataLogger& logger,
                   const std::atomic<bool>& stop_requested);
 
-    int run();  // exit code: 0 done, 1 error (landed), 3 control released to operator, 130 Ctrl+C
+    [[nodiscard]] int run();
 
 private:
-    enum class FlightResult { Completed, Stopped, Failed, ReleasedToOperator };
+    using Clock = std::chrono::steady_clock;
 
-    bool prepare();         // SET_PARAMS, SET_GUIDED, ARM
-    FlightResult fly();     // CLIMB_TO_HIGH .. HOLD_LOW
-    bool land();            // LAND: command LAND (retried, e.g. after link loss), wait for disarm
+    enum class FlightResult { Completed, Stopped, Failed, ReleasedToOperator };
+    enum class StepResult { Continue, MissionComplete, TimedOut };
+
+    bool prepare_vehicle();  // SET_PARAMS, SET_GUIDED, ARM
+    bool configure_parameters();
+    bool wait_for_telemetry();
+    FlightResult fly_mission();  // CLIMB_TO_HIGH .. HOLD_LOW
+    StepResult advance_mission_state(double alt_above_ground_m, Clock::time_point now);
+    bool land_and_wait_disarmed();  // LAND (retried, e.g. after link loss), wait for disarm
+
+    [[nodiscard]] double target_alt_m() const;
     void transition(MissionState next, const std::string& reason);
+    void enter_flight_state(MissionState next, const std::string& reason, Clock::time_point now);
     bool fail(const std::string& reason);  // -> ERROR, returns false
 
-    const Config& cfg_;
+    const Config& config_;
     DroneInterface& drone_;
     DataLogger& logger_;
     const std::atomic<bool>& stop_requested_;
     MissionState state_ = MissionState::Init;
     double hover_thrust_ = 0.0;
-    bool armed_by_us_ = false;
+    bool armed_by_mission_ = false;
+    Clock::time_point state_entered_{};
+    Clock::time_point within_tolerance_since_{};  // default value: not within tolerance
 };
 
 }  // namespace altctl

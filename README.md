@@ -57,6 +57,8 @@ Other tools:
 
 ## How it works
 
+### Control loop
+
 On every control tick (50 Hz) the program:
 
 1. Reads altitude and climb rate from `LOCAL_POSITION_NED`.
@@ -65,17 +67,13 @@ On every control tick (50 Hz) the program:
 4. **Inner loop (PID):** converts the climb-rate error into a thrust correction.
 5. Sends `MOT_THST_HOVER` plus the correction as the thrust value.
 
-| Component | Role |
-|---|---|
-| `DroneInterface` | MAVSDK: telemetry, parameters, mode, arming, thrust commands |
-| `AltitudeController` | take-off phase + cascade above |
-| `PIDController` | derivative on measurement, filtered D, anti-windup, output limits |
-| `MissionRunner` | state machine, 50 Hz control loop, safety checks |
-| `DataLogger` | per-tick CSV log |
+### Take-off
 
-**Take-off:** until the copter is 0.3 m above the ground, thrust is fixed at hover + 0.10, with the PID held in reset. The cascade then takes over from the current altitude and speed.
+Until the copter is 0.3 m above the ground, thrust is fixed at hover + 0.10, with the PID held in reset. The cascade then takes over from the current altitude and speed.
 
-**Safety:** any of these triggers LAND:
+### Safety
+
+Any of these triggers LAND:
 - telemetry older than 0.2 s, or a loop stall over 0.5 s
 - an unexpected disarm
 - altitude above 15 m
@@ -85,6 +83,25 @@ On every control tick (50 Hz) the program:
 If someone else changes the flight mode, the controller stops and leaves the vehicle to them. It refuses to start on an armed vehicle.
 
 Exit codes: 0 done, 1 error, 3 released to the operator, 130 interrupted.
+
+### Code structure
+
+The controller is in `include/altctl/` (headers) and `src/`:
+
+| Class | Main methods | Role |
+|---|---|---|
+| `DroneInterface` | `connect`, `state`, `set_mode`, `arm`, `land`, `send_thrust` | All MAVLink communication through MAVSDK: telemetry, parameters, mode, arming, thrust commands |
+| `AltitudeController` | `reset`, `update` | Take-off phase, setpoint trajectory and cascade; `update` returns the thrust for one tick |
+| `PidController` | `update`, `reset`, `set_integrator_frozen` | PID with derivative on measurement, filtered D, anti-windup, output limits |
+| `MissionRunner` | `run` (→ `prepare_vehicle`, `fly_mission`, `land_and_wait_disarmed`) | Mission state machine, 50 Hz control loop, safety checks |
+| `DataLogger` | `open`, `write` | Per-tick CSV log |
+
+Other parts of the code:
+- **`Config`** holds all settings and their defaults. `config/mission.conf` and `--set key=value` override them.
+- **`main.cpp`** parses arguments, handles Ctrl+C, and connects the classes together.
+- **`diagnostics.cpp`** contains the `--run telemetry` and `--run open-loop` bring-up checks.
+
+`MissionRunner` uses `DroneInterface`, `AltitudeController` and `DataLogger`. `AltitudeController` uses `PidController`. The controller classes don't depend on MAVSDK, so the unit tests in `tests/` run them against a simulated vertical-dynamics model without SITL. Config parsing is tested too.
 
 ## Results
 

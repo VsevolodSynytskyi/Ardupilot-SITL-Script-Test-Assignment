@@ -19,7 +19,7 @@ BIN = os.path.join(ROOT, "build", "altitude_control")
 OUT = os.path.join(ROOT, "logs", "tune")
 BASE = ["hold_time_s=5"]  # shorter holds for tuning runs
 COLS = ["overshoot_up_m", "settle10_up_s", "overshoot_down_m", "settle10_down_s",
-        "hold_rms_up_m", "hold_rms_down_m", "vel_rms_up_ms", "vel_rms_down_ms",
+        "hold_rms_up_m", "hold_rms_down_m", "vel_rms_up_mps", "vel_rms_down_mps",
         "thrust_jitter_up", "thrust_max"]
 FMT = {"thrust_jitter_up": "13.5f"}
 

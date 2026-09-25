@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <fstream>
 #include <string>
 
@@ -11,21 +12,21 @@ namespace altctl {
 class DataLogger {
 public:
     struct Row {
-        double t_s = 0.0;
+        double time_s = 0.0;
         const char* state = "";
         double target_alt_m = 0.0;
         double alt_m = 0.0;
-        double climb_ms = 0.0;
-        double dt_s = 0.0;
-        AltitudeController::Output ctl;
+        double climb_mps = 0.0;
+        double loop_period_s = 0.0;
+        AltitudeController::Output controller;
     };
 
-    bool open(const std::string& path);  // creates parent directories
+    [[nodiscard]] bool open(const std::string& path);  // creates parent directories
     void write(const Row& row);
 
 private:
-    std::ofstream out_;
-    unsigned long rows_ = 0;
+    std::ofstream file_;
+    std::size_t rows_written_ = 0;
 };
 
 }  // namespace altctl

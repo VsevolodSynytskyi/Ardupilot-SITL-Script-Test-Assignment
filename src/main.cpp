@@ -2,6 +2,7 @@
 #include <csignal>
 #include <cstdlib>
 #include <iostream>
+#include <optional>
 #include <string>
 
 #include "altctl/config.hpp"
@@ -12,86 +13,107 @@
 
 namespace {
 
-std::atomic<bool> g_stop{false};
+constexpr const char* kDefaultConfigPath = "config/mission.conf";
+constexpr auto kConnectTimeout = std::chrono::seconds(20);
+constexpr int kExitUsageError = 2;
+
+std::atomic<bool> g_stop_requested{false};
 
 // First Ctrl+C: stop the mission and land. Second Ctrl+C: quit immediately.
-void on_signal(int)
+void handle_stop_signal(int)
 {
-    if (g_stop.exchange(true)) {
-        std::_Exit(130);
+    if (g_stop_requested.exchange(true)) {
+        std::_Exit(altctl::MissionRunner::kExitInterrupted);
     }
 }
 
-void usage(const char* argv0)
+void print_usage(const char* program)
 {
-    std::cerr << "Usage: " << argv0
+    std::cerr << "Usage: " << program
               << " [--config path] [--set key=value]... [--run mission|telemetry|open-loop]\n"
-              << "  default config: config/mission.conf, default run: mission\n";
+              << "  default config: " << kDefaultConfigPath << ", default run: mission\n";
+}
+
+struct Options {
+    std::string run_mode = "mission";
+    altctl::Config config;
+};
+
+std::optional<Options> parse_options(int argc, char** argv)
+{
+    // --config first, so --set overrides are applied on top of the file
+    std::string config_path = kDefaultConfigPath;
+    for (int i = 1; i < argc; ++i) {
+        if (std::string(argv[i]) == "--config" && i + 1 < argc) {
+            config_path = argv[++i];
+        }
+    }
+    Options options;
+    options.config = altctl::Config::load(config_path);
+    for (int i = 1; i < argc; ++i) {
+        const std::string argument = argv[i];
+        const bool has_value = i + 1 < argc;
+        if (argument == "--config" && has_value) {
+            ++i;
+        } else if (argument == "--run" && has_value) {
+            options.run_mode = argv[++i];
+        } else if (argument == "--set" && has_value) {
+            const std::string assignment = argv[++i];
+            const auto separator = assignment.find('=');
+            if (separator == std::string::npos) {
+                throw std::runtime_error("--set expects key=value, got " + assignment);
+            }
+            options.config.set(assignment.substr(0, separator), assignment.substr(separator + 1));
+        } else {
+            return std::nullopt;
+        }
+    }
+    return options;
+}
+
+int run_mission(const altctl::Config& config, altctl::DroneInterface& drone)
+{
+    altctl::DataLogger logger;
+    if (!logger.open(config.log_path)) {
+        std::cerr << "cannot open log " << config.log_path << "\n";
+        return altctl::MissionRunner::kExitError;
+    }
+    std::cout << "[main] logging to " << config.log_path << "\n";
+    altctl::MissionRunner mission(config, drone, logger, g_stop_requested);
+    return mission.run();
 }
 
 }  // namespace
 
 int main(int argc, char** argv)
 {
-    std::string config_path = "config/mission.conf";
-    std::string run = "mission";
-    altctl::Config cfg;
+    std::optional<Options> options;
     try {
-        // --config first, so --set overrides are applied on top of the file
-        for (int i = 1; i < argc; ++i) {
-            if (std::string(argv[i]) == "--config" && i + 1 < argc) {
-                config_path = argv[++i];
-            }
-        }
-        cfg = altctl::Config::load(config_path);
-        for (int i = 1; i < argc; ++i) {
-            const std::string arg = argv[i];
-            if (arg == "--config") {
-                ++i;
-            } else if (arg == "--run" && i + 1 < argc) {
-                run = argv[++i];
-            } else if (arg == "--set" && i + 1 < argc) {
-                const std::string kv = argv[++i];
-                const auto eq = kv.find('=');
-                if (eq == std::string::npos) {
-                    throw std::runtime_error("--set expects key=value, got " + kv);
-                }
-                cfg.set(kv.substr(0, eq), kv.substr(eq + 1));
-            } else {
-                usage(argv[0]);
-                return 2;
-            }
-        }
-    } catch (const std::exception& e) {
-        std::cerr << e.what() << "\n";
-        return 2;
+        options = parse_options(argc, argv);
+    } catch (const std::exception& error) {
+        std::cerr << error.what() << "\n";
+        return kExitUsageError;
+    }
+    if (!options || (options->run_mode != "mission" && options->run_mode != "telemetry" &&
+                     options->run_mode != "open-loop")) {
+        print_usage(argv[0]);
+        return kExitUsageError;
     }
 
-    std::signal(SIGINT, on_signal);
-    std::signal(SIGTERM, on_signal);
+    std::signal(SIGINT, handle_stop_signal);
+    std::signal(SIGTERM, handle_stop_signal);
     // A closed stdout (e.g. the parent script exited) must not kill the process mid-flight.
     std::signal(SIGPIPE, SIG_IGN);
 
-    altctl::DroneInterface drone(cfg.connection_url);
-    if (!drone.connect(std::chrono::seconds(20))) {
-        return 1;
+    altctl::DroneInterface drone(options->config.connection_url);
+    if (!drone.connect(kConnectTimeout)) {
+        return altctl::MissionRunner::kExitError;
     }
-    if (run == "telemetry") {
-        return altctl::run_telemetry_check(cfg, drone);
+    if (options->run_mode == "telemetry") {
+        return altctl::run_telemetry_check(drone);
     }
-    if (run == "open-loop") {
-        return altctl::run_open_loop_takeoff(cfg, drone, g_stop);
+    if (options->run_mode == "open-loop") {
+        return altctl::run_open_loop_takeoff(options->config, drone, g_stop_requested);
     }
-    if (run == "mission") {
-        altctl::DataLogger logger;
-        if (!logger.open(cfg.log_path)) {
-            std::cerr << "cannot open log " << cfg.log_path << "\n";
-            return 1;
-        }
-        std::cout << "[main] logging to " << cfg.log_path << "\n";
-        altctl::MissionRunner mission(cfg, drone, logger, g_stop);
-        return mission.run();
-    }
-    usage(argv[0]);
-    return 2;
+    return run_mission(options->config, drone);
 }

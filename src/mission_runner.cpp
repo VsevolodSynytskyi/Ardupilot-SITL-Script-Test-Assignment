@@ -1,9 +1,9 @@
 #include "altctl/mission_runner.hpp"
 
 #include <algorithm>
-#include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <optional>
 #include <thread>
 
 #if defined(__APPLE__)
@@ -20,9 +20,14 @@ namespace {
 
 using Clock = std::chrono::steady_clock;
 
-double seconds(Clock::duration d)
+double seconds(Clock::duration duration)
 {
-    return std::chrono::duration<double>(d).count();
+    return std::chrono::duration<double>(duration).count();
+}
+
+Clock::duration duration_from_seconds(double duration_s)
+{
+    return std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(duration_s));
 }
 
 // Telemetry older than this during flight is treated as a lost link (10 samples at 50 Hz).
@@ -35,14 +40,63 @@ constexpr double kArmGraceS = 1.0;
 constexpr double kLandCommandRetryS = 30.0;
 // Abort if the vehicle climbs this far above the high target.
 constexpr double kAltitudeLimitMarginM = 5.0;
-// GUID_OPTIONS bit 3: SET_ATTITUDE_TARGET.thrust is thrust, not a climb-rate request.
-constexpr int32_t kGuidOptionThrustAsThrust = 8;
+
+constexpr auto kReadyTimeout = std::chrono::seconds(90);
+constexpr auto kTelemetryWaitTimeout = std::chrono::seconds(60);
+constexpr auto kFirstRateWindow = std::chrono::milliseconds(1000);
+constexpr auto kRetryRateWindow = std::chrono::milliseconds(1500);
+constexpr int kTelemetryWaitReportEvery = 4;
+constexpr auto kModeChangeTimeout = std::chrono::seconds(5);
+constexpr auto kLandModeTimeout = std::chrono::seconds(3);
+constexpr auto kDisarmTimeout = std::chrono::seconds(120);
+constexpr auto kLandingPollInterval = std::chrono::milliseconds(100);
+constexpr double kLandingReportIntervalS = 2.0;
+constexpr float kMinPlausibleHoverThrust = 0.1F;
+constexpr float kMaxPlausibleHoverThrust = 0.8F;
+
+struct TickStatus {
+    bool first_tick = true;
+    double loop_period_s = 0.0;
+    double telemetry_age_s = 0.0;
+    double time_since_start_s = 0.0;
+    double time_since_last_send_s = 0.0;
+    bool armed = false;
+    double alt_m = 0.0;
+    double max_alt_m = 0.0;
+};
+
+std::optional<std::string> find_safety_violation(const TickStatus& tick, const Config& config)
+{
+    if (!tick.first_tick && tick.loop_period_s > config.stream_watchdog_s) {
+        return "control loop stalled: " + std::to_string(tick.loop_period_s) +
+               " s between commands";
+    }
+    if (tick.telemetry_age_s > kTelemetryStaleS) {
+        return "telemetry stale (no LOCAL_POSITION_NED for " +
+               std::to_string(tick.telemetry_age_s) + " s)";
+    }
+    if (!tick.armed && tick.time_since_start_s > kArmGraceS) {
+        return std::string("vehicle disarmed unexpectedly");
+    }
+    if (tick.time_since_last_send_s > config.stream_watchdog_s) {
+        return std::string("thrust commands failing to send");
+    }
+    if (tick.alt_m > tick.max_alt_m) {
+        return "altitude " + std::to_string(tick.alt_m) + " m above limit";
+    }
+    return std::nullopt;
+}
+
+bool is_holding(MissionState state)
+{
+    return state == MissionState::HoldHigh || state == MissionState::HoldLow;
+}
 
 }  // namespace
 
-const char* to_string(MissionState s)
+const char* to_string(MissionState state)
 {
-    switch (s) {
+    switch (state) {
         case MissionState::Init: return "INIT";
         case MissionState::SetParams: return "SET_PARAMS";
         case MissionState::SetGuided: return "SET_GUIDED";
@@ -58,48 +112,34 @@ const char* to_string(MissionState s)
     return "?";
 }
 
-MissionRunner::MissionRunner(const Config& cfg, DroneInterface& drone, DataLogger& logger,
+MissionRunner::MissionRunner(const Config& config, DroneInterface& drone, DataLogger& logger,
                              const std::atomic<bool>& stop_requested)
-    : cfg_(cfg), drone_(drone), logger_(logger), stop_requested_(stop_requested)
+    : config_(config), drone_(drone), logger_(logger), stop_requested_(stop_requested)
 {
-}
-
-void MissionRunner::transition(MissionState next, const std::string& reason)
-{
-    std::printf("[mission] %s -> %s%s%s\n", to_string(state_), to_string(next),
-                reason.empty() ? "" : ": ", reason.c_str());
-    std::fflush(stdout);
-    state_ = next;
-}
-
-bool MissionRunner::fail(const std::string& reason)
-{
-    transition(MissionState::Error, reason);
-    return false;
 }
 
 int MissionRunner::run()
 {
-    if (!prepare()) {
-        if (armed_by_us_) {
-            land();
+    if (!prepare_vehicle()) {
+        if (armed_by_mission_) {
+            land_and_wait_disarmed();
         }
-        return 1;
+        return kExitError;
     }
-    const auto result = fly();
+    const auto result = fly_mission();
     if (result == FlightResult::ReleasedToOperator) {
         std::printf("[mission] thrust stream stopped; vehicle left to the operator\n");
-        return 3;
+        return kExitReleasedToOperator;
     }
-    const bool landed = land();
+    const bool landed = land_and_wait_disarmed();
     if (result == FlightResult::Completed && landed) {
         transition(MissionState::Done, "mission complete");
-        return 0;
+        return kExitDone;
     }
-    return result == FlightResult::Stopped ? 130 : 1;
+    return result == FlightResult::Stopped ? kExitInterrupted : kExitError;
 }
 
-bool MissionRunner::prepare()
+bool MissionRunner::prepare_vehicle()
 {
     if (drone_.state().armed) {
         // Mission and take-off logic assume a vehicle on the ground (ground reference, take-off
@@ -107,53 +147,18 @@ bool MissionRunner::prepare()
         return fail("vehicle is already armed; land and disarm it first");
     }
     transition(MissionState::SetParams, "");
-    auto guid = drone_.get_param_int("GUID_OPTIONS");
-    if (!guid || (*guid & kGuidOptionThrustAsThrust) == 0) {
-        std::printf("[mission] GUID_OPTIONS=%d, setting %d (thrust as thrust)\n", guid ? *guid : -1,
-                    kGuidOptionThrustAsThrust);
-        if (!drone_.set_param_int("GUID_OPTIONS", kGuidOptionThrustAsThrust)) {
-            return fail("cannot set GUID_OPTIONS");
-        }
-        guid = drone_.get_param_int("GUID_OPTIONS");
+    if (!configure_parameters()) {
+        return false;
     }
-    if (!guid || (*guid & kGuidOptionThrustAsThrust) == 0) {
-        return fail("GUID_OPTIONS readback does not have bit 3 set");
-    }
-    const auto hover = drone_.get_param_float("MOT_THST_HOVER");
-    if (!hover || *hover < 0.1f || *hover > 0.8f) {
-        return fail("MOT_THST_HOVER missing or implausible");
-    }
-    hover_thrust_ = *hover;
-    const auto guid_timeout = drone_.get_param_float("GUID_TIMEOUT");
-    std::printf("[mission] GUID_OPTIONS=%d MOT_THST_HOVER=%.3f GUID_TIMEOUT=%.1f s\n", *guid,
-                hover_thrust_, guid_timeout ? *guid_timeout : -1.0f);
-
-    if (!drone_.wait_ready(std::chrono::seconds(90), [this] { return stop_requested_.load(); })) {
+    if (!drone_.wait_ready(kReadyTimeout, [this] { return stop_requested_.load(); })) {
         return fail(stop_requested_ ? "interrupted by user" : "vehicle not ready (EKF / pre-arm)");
     }
-
-    // The controller needs fresh altitude every tick; never arm on a slow telemetry stream
-    // (flying on ~3 Hz position data gives bang-bang thrust). Right after SITL start the stream
-    // may not flow yet even though the health flags are OK, so wait for it.
-    double rate = drone_.measure_position_rate(std::chrono::milliseconds(1000));
-    const auto rate_deadline = Clock::now() + std::chrono::seconds(60);
-    for (int attempt = 0;
-         rate < kMinTelemetryRateHz && Clock::now() < rate_deadline && !stop_requested_; ++attempt) {
-        if (attempt % 4 == 0) {
-            std::printf("[mission] waiting for telemetry: LOCAL_POSITION_NED at %.1f Hz\n", rate);
-        }
-        rate = drone_.measure_position_rate(std::chrono::milliseconds(1500), true);
+    if (!wait_for_telemetry()) {
+        return false;
     }
-    if (stop_requested_) {
-        return fail("interrupted by user");
-    }
-    if (rate < kMinTelemetryRateHz) {
-        return fail("telemetry too slow for control (" + std::to_string(rate) + " Hz)");
-    }
-    std::printf("[mission] telemetry rate %.1f Hz\n", rate);
 
     transition(MissionState::SetGuided, "");
-    if (!drone_.set_mode(CopterMode::Guided, std::chrono::seconds(5))) {
+    if (!drone_.set_mode(CopterMode::Guided, kModeChangeTimeout)) {
         return fail("GUIDED not confirmed");
     }
 
@@ -164,153 +169,151 @@ bool MissionRunner::prepare()
     if (!drone_.arm()) {
         return fail("arming rejected");
     }
-    armed_by_us_ = true;
+    armed_by_mission_ = true;
     return true;
 }
 
-MissionRunner::FlightResult MissionRunner::fly()
+bool MissionRunner::configure_parameters()
+{
+    auto guid_options = drone_.get_param_int("GUID_OPTIONS");
+    if (!guid_options || (*guid_options & kGuidOptionThrustAsThrust) == 0) {
+        std::printf("[mission] GUID_OPTIONS=%d, setting %d (thrust as thrust)\n",
+                    guid_options ? *guid_options : -1, kGuidOptionThrustAsThrust);
+        if (!drone_.set_param_int("GUID_OPTIONS", kGuidOptionThrustAsThrust)) {
+            return fail("cannot set GUID_OPTIONS");
+        }
+        guid_options = drone_.get_param_int("GUID_OPTIONS");
+    }
+    if (!guid_options || (*guid_options & kGuidOptionThrustAsThrust) == 0) {
+        return fail("GUID_OPTIONS readback does not have bit 3 set");
+    }
+
+    const auto hover_thrust = drone_.get_param_float("MOT_THST_HOVER");
+    if (!hover_thrust || *hover_thrust < kMinPlausibleHoverThrust ||
+        *hover_thrust > kMaxPlausibleHoverThrust) {
+        return fail("MOT_THST_HOVER missing or implausible");
+    }
+    hover_thrust_ = *hover_thrust;
+
+    const auto guided_timeout_s = drone_.get_param_float("GUID_TIMEOUT");
+    std::printf("[mission] GUID_OPTIONS=%d MOT_THST_HOVER=%.3f GUID_TIMEOUT=%.1f s\n",
+                *guid_options, hover_thrust_, guided_timeout_s ? *guided_timeout_s : -1.0F);
+    return true;
+}
+
+// The controller needs fresh altitude every tick; never arm on a slow telemetry stream
+// (flying on ~3 Hz position data gives bang-bang thrust). Right after SITL start the stream
+// may not flow yet even though the health flags are OK, so wait for it.
+bool MissionRunner::wait_for_telemetry()
+{
+    double rate_hz = drone_.measure_position_rate(kFirstRateWindow);
+    const auto deadline = Clock::now() + kTelemetryWaitTimeout;
+    for (int attempt = 0;
+         rate_hz < kMinTelemetryRateHz && Clock::now() < deadline && !stop_requested_; ++attempt) {
+        if (attempt % kTelemetryWaitReportEvery == 0) {
+            std::printf("[mission] waiting for telemetry: LOCAL_POSITION_NED at %.1f Hz\n",
+                        rate_hz);
+        }
+        drone_.request_position_rate();
+        rate_hz = drone_.measure_position_rate(kRetryRateWindow);
+    }
+    if (stop_requested_) {
+        return fail("interrupted by user");
+    }
+    if (rate_hz < kMinTelemetryRateHz) {
+        return fail("telemetry too slow for control (" + std::to_string(rate_hz) + " Hz)");
+    }
+    std::printf("[mission] telemetry rate %.1f Hz\n", rate_hz);
+    return true;
+}
+
+MissionRunner::FlightResult MissionRunner::fly_mission()
 {
 #if defined(__APPLE__)
     // macOS coalesces timers of ordinary background processes (loop gaps up to ~100 ms seen);
     // the control loop is latency-sensitive.
     pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
 #endif
-    AltitudeController ctl(cfg_, hover_thrust_);
-    const auto s0 = drone_.state();
-    ctl.reset(s0.alt_m);
-    const double yaw_hold = s0.yaw_rad;  // level attitude, heading held from arming
-    const double ground_alt = s0.alt_m;
-    const double max_alt = ground_alt + cfg_.alt_high_m + kAltitudeLimitMarginM;
+    const auto initial = drone_.state();
+    const double ground_alt_m = initial.alt_m;
+    const double yaw_hold_rad = initial.yaw_rad;  // level attitude, heading held from arming
+    AltitudeController controller(config_, hover_thrust_);
+    controller.reset(ground_alt_m);
 
-    const auto period = std::chrono::duration_cast<Clock::duration>(
-        std::chrono::duration<double>(1.0 / cfg_.control_rate_hz));
-    const auto t_start = Clock::now();
-    auto t_state = t_start;       // entry time of current state
-    auto t_in_tol = Clock::time_point{};  // since when |error| < tolerance (0 = not in tolerance)
-    auto target_of = [this](MissionState st) {
-        return st == MissionState::ClimbToHigh || st == MissionState::HoldHigh ? cfg_.alt_high_m
-                                                                               : cfg_.alt_low_m;
-    };
-    auto last_tick = t_start;
-    auto next_tick = t_start;
-    auto last_send_ok = t_start;
-    uint64_t ticks = 0;
-    double max_dt = 0.0;
+    const auto control_period = duration_from_seconds(1.0 / config_.control_rate_hz);
+    const auto start = Clock::now();
+    auto previous_tick = start;
+    auto next_tick = start;
+    auto last_successful_send = start;
+    uint64_t commands_sent = 0;
+    double max_loop_period_s = 0.0;
 
-    transition(MissionState::ClimbToHigh, "streaming thrust");
+    enter_flight_state(MissionState::ClimbToHigh, "streaming thrust", start);
     while (true) {
         const auto now = Clock::now();
-        const double dt = seconds(now - last_tick);
-        last_tick = now;
-        max_dt = std::max(max_dt, dt);
-        const auto s = drone_.state();
-        const double in_state = seconds(now - t_state);
+        const double loop_period_s = seconds(now - previous_tick);
+        previous_tick = now;
+        max_loop_period_s = std::max(max_loop_period_s, loop_period_s);
+        const auto vehicle = drone_.state();
 
-        // --- safety checks -------------------------------------------------------------
         if (stop_requested_) {
             transition(MissionState::Error, "interrupted by user");
             return FlightResult::Stopped;
         }
-        if (ticks > 0 && dt > cfg_.stream_watchdog_s) {
-            fail("control loop stalled: " + std::to_string(dt) + " s between commands");
+        const TickStatus tick{commands_sent == 0,
+                              loop_period_s,
+                              seconds(now - vehicle.last_position_update),
+                              seconds(now - start),
+                              seconds(now - last_successful_send),
+                              vehicle.armed,
+                              vehicle.alt_m,
+                              ground_alt_m + config_.alt_high_m + kAltitudeLimitMarginM};
+        if (const auto violation = find_safety_violation(tick, config_)) {
+            fail(*violation);
             return FlightResult::Failed;
         }
-        if (seconds(now - s.last_position_update) > kTelemetryStaleS) {
-            fail("telemetry stale (no LOCAL_POSITION_NED for " +
-                 std::to_string(seconds(now - s.last_position_update)) + " s)");
-            return FlightResult::Failed;
-        }
-        if (!s.armed && seconds(now - t_start) > kArmGraceS) {
-            fail("vehicle disarmed unexpectedly");
-            return FlightResult::Failed;
-        }
-        if (seconds(now - last_send_ok) > cfg_.stream_watchdog_s) {
-            fail("thrust commands failing to send");
-            return FlightResult::Failed;
-        }
-        if (s.custom_mode != static_cast<uint32_t>(CopterMode::Guided)) {
+        if (!vehicle.is_in(CopterMode::Guided)) {
             // Someone else (operator / GCS) changed the mode: do not fight them.
             transition(MissionState::Error, "mode changed externally (custom_mode=" +
-                                                std::to_string(s.custom_mode) + ")");
+                                                std::to_string(vehicle.custom_mode) + ")");
             return FlightResult::ReleasedToOperator;
         }
-        if (s.alt_m > max_alt) {
-            fail("altitude " + std::to_string(s.alt_m) + " m above limit");
-            return FlightResult::Failed;
-        }
 
-        // --- state machine -------------------------------------------------------------
-        const double error = target_of(state_) - (s.alt_m - ground_alt);
-        if (std::abs(error) < cfg_.settle_tolerance_m) {
-            if (t_in_tol == Clock::time_point{}) {
-                t_in_tol = now;
-            }
-        } else {
-            t_in_tol = Clock::time_point{};
-        }
-        const bool settled = t_in_tol != Clock::time_point{} &&
-                             seconds(now - t_in_tol) >= cfg_.settle_time_s;
-
-        auto enter = [&](MissionState next, const std::string& why) {
-            transition(next, why);
-            t_state = now;
-            t_in_tol = Clock::time_point{};
-        };
-        char why[96];
-        switch (state_) {
-            case MissionState::ClimbToHigh:
-            case MissionState::DescendToLow:
-                if (settled) {
-                    std::snprintf(why, sizeof(why), "|err|<%.2f m for %.1f s (after %.1f s)",
-                                  cfg_.settle_tolerance_m, cfg_.settle_time_s, in_state);
-                    enter(state_ == MissionState::ClimbToHigh ? MissionState::HoldHigh
-                                                              : MissionState::HoldLow,
-                          why);
-                } else if (in_state > cfg_.state_timeout_s) {
-                    fail(std::string(to_string(state_)) + " timed out");
-                    return FlightResult::Failed;
-                }
-                break;
-            case MissionState::HoldHigh:
-            case MissionState::HoldLow:
-                if (in_state >= cfg_.hold_time_s) {
-                    std::snprintf(why, sizeof(why), "held %.1f s", in_state);
-                    if (state_ == MissionState::HoldHigh) {
-                        enter(MissionState::DescendToLow, why);
-                    } else {
-                        std::printf("[mission] %llu commands, %.1f Hz, max loop dt %.1f ms\n",
-                                    static_cast<unsigned long long>(ticks),
-                                    ticks / seconds(now - t_start), max_dt * 1000.0);
-                        return FlightResult::Completed;
-                    }
-                }
-                break;
-            default:
+        const double alt_above_ground_m = vehicle.alt_m - ground_alt_m;
+        switch (advance_mission_state(alt_above_ground_m, now)) {
+            case StepResult::TimedOut:
+                fail(std::string(to_string(state_)) + " timed out");
+                return FlightResult::Failed;
+            case StepResult::MissionComplete:
+                std::printf("[mission] %llu commands, %.1f Hz, max loop dt %.1f ms\n",
+                            static_cast<unsigned long long>(commands_sent),
+                            commands_sent / seconds(now - start), max_loop_period_s * 1000.0);
+                return FlightResult::Completed;
+            case StepResult::Continue:
                 break;
         }
 
-        // --- control + command ------------------------------------------------------------
-        const double target_now = target_of(state_);  // state may have changed above
-        const auto out = ctl.update(ground_alt + target_now, s.alt_m, s.climb_ms, ticks ? dt : 0.0);
-        if (drone_.send_thrust(out.thrust, yaw_hold)) {
-            last_send_ok = now;
+        const auto output = controller.update(ground_alt_m + target_alt_m(), vehicle.alt_m,
+                                              vehicle.climb_mps, tick.first_tick ? 0.0 : loop_period_s);
+        if (drone_.send_thrust(output.thrust, yaw_hold_rad)) {
+            last_successful_send = now;
         }
-        ++ticks;
+        ++commands_sent;
 
-        auto logged = out;  // log altitudes relative to the take-off point
-        logged.alt_setpoint_m -= ground_alt;
-        logger_.write({seconds(now - t_start), to_string(state_), target_now, s.alt_m - ground_alt,
-                       s.climb_ms, dt, logged});
-        if (ticks % static_cast<uint64_t>(cfg_.control_rate_hz) == 0) {
+        auto logged_output = output;  // altitudes relative to the take-off point
+        logged_output.setpoint_alt_m -= ground_alt_m;
+        logger_.write({seconds(now - start), to_string(state_), target_alt_m(), alt_above_ground_m,
+                       vehicle.climb_mps, loop_period_s, logged_output});
+        if (commands_sent % static_cast<uint64_t>(config_.control_rate_hz) == 0) {
             std::printf("[ctl] t=%5.1fs %-14s target=%5.2f sp=%5.2f alt=%5.2f climb=%+5.2f "
                         "thrust=%.3f i=%+.3f\n",
-                        seconds(now - t_start), to_string(state_), target_now,
-                        logged.alt_setpoint_m, s.alt_m - ground_alt, s.climb_ms,
-                        out.thrust, out.vel_terms.i);
+                        seconds(now - start), to_string(state_), target_alt_m(),
+                        logged_output.setpoint_alt_m, alt_above_ground_m, vehicle.climb_mps,
+                        output.thrust, output.velocity_pid_terms.i);
             std::fflush(stdout);
         }
 
-        next_tick += period;
+        next_tick += control_period;
         if (next_tick < Clock::now()) {
             next_tick = Clock::now();  // overrun: don't try to catch up with a burst
         }
@@ -318,34 +321,70 @@ MissionRunner::FlightResult MissionRunner::fly()
     }
 }
 
-bool MissionRunner::land()
+MissionRunner::StepResult MissionRunner::advance_mission_state(double alt_above_ground_m,
+                                                               Clock::time_point now)
+{
+    const bool within_tolerance =
+        std::abs(target_alt_m() - alt_above_ground_m) < config_.settle_tolerance_m;
+    if (!within_tolerance) {
+        within_tolerance_since_ = Clock::time_point{};
+    } else if (within_tolerance_since_ == Clock::time_point{}) {
+        within_tolerance_since_ = now;
+    }
+    const bool settled = within_tolerance_since_ != Clock::time_point{} &&
+                         seconds(now - within_tolerance_since_) >= config_.settle_time_s;
+    const double time_in_state_s = seconds(now - state_entered_);
+
+    char reason[96];
+    if (is_holding(state_)) {
+        if (time_in_state_s < config_.hold_time_s) {
+            return StepResult::Continue;
+        }
+        if (state_ == MissionState::HoldLow) {
+            return StepResult::MissionComplete;
+        }
+        std::snprintf(reason, sizeof(reason), "held %.1f s", time_in_state_s);
+        enter_flight_state(MissionState::DescendToLow, reason, now);
+        return StepResult::Continue;
+    }
+
+    if (settled) {
+        std::snprintf(reason, sizeof(reason), "|err|<%.2f m for %.1f s (after %.1f s)",
+                      config_.settle_tolerance_m, config_.settle_time_s, time_in_state_s);
+        enter_flight_state(state_ == MissionState::ClimbToHigh ? MissionState::HoldHigh
+                                                               : MissionState::HoldLow,
+                           reason, now);
+        return StepResult::Continue;
+    }
+    return time_in_state_s > config_.state_timeout_s ? StepResult::TimedOut : StepResult::Continue;
+}
+
+bool MissionRunner::land_and_wait_disarmed()
 {
     transition(MissionState::Land, "switching to LAND, thrust stream stopped");
     // Retry: after a link loss the command only gets through once the link is back.
     // Meanwhile ArduPilot holds altitude (GUID_TIMEOUT expired with no thrust stream).
-    const auto retry_until = Clock::now() + std::chrono::duration_cast<Clock::duration>(
-                                                std::chrono::duration<double>(kLandCommandRetryS));
-    bool commanded = false;
-    while (!commanded && Clock::now() < retry_until) {
-        commanded = drone_.land() || drone_.set_mode(CopterMode::Land, std::chrono::seconds(3));
-        if (drone_.state().custom_mode == static_cast<uint32_t>(CopterMode::Land)) {
-            commanded = true;
-        }
+    const auto retry_deadline = Clock::now() + duration_from_seconds(kLandCommandRetryS);
+    bool land_commanded = false;
+    while (!land_commanded && Clock::now() < retry_deadline) {
+        land_commanded = drone_.land() || drone_.set_mode(CopterMode::Land, kLandModeTimeout) ||
+                         drone_.state().is_in(CopterMode::Land);
     }
-    if (!commanded) {
+    if (!land_commanded) {
         std::printf("[mission] could not command LAND for %.0f s; vehicle is holding altitude in "
                     "GUIDED, take over from the GCS\n",
                     kLandCommandRetryS);
         return false;
     }
-    const auto deadline = Clock::now() + std::chrono::seconds(120);
-    auto last_print = Clock::now();
-    while (drone_.state().armed && Clock::now() < deadline) {
-        if (seconds(Clock::now() - last_print) > 2.0) {
+
+    const auto disarm_deadline = Clock::now() + kDisarmTimeout;
+    auto last_report = Clock::now();
+    while (drone_.state().armed && Clock::now() < disarm_deadline) {
+        if (seconds(Clock::now() - last_report) > kLandingReportIntervalS) {
             std::printf("[mission] landing: alt=%.2f m\n", drone_.state().alt_m);
-            last_print = Clock::now();
+            last_report = Clock::now();
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        std::this_thread::sleep_for(kLandingPollInterval);
     }
     if (drone_.state().armed) {
         std::printf("[mission] still armed after LAND timeout\n");
@@ -353,6 +392,35 @@ bool MissionRunner::land()
     }
     std::printf("[mission] landed and disarmed\n");
     return true;
+}
+
+double MissionRunner::target_alt_m() const
+{
+    return state_ == MissionState::ClimbToHigh || state_ == MissionState::HoldHigh
+               ? config_.alt_high_m
+               : config_.alt_low_m;
+}
+
+void MissionRunner::transition(MissionState next, const std::string& reason)
+{
+    std::printf("[mission] %s -> %s%s%s\n", to_string(state_), to_string(next),
+                reason.empty() ? "" : ": ", reason.c_str());
+    std::fflush(stdout);
+    state_ = next;
+}
+
+void MissionRunner::enter_flight_state(MissionState next, const std::string& reason,
+                                       Clock::time_point now)
+{
+    transition(next, reason);
+    state_entered_ = now;
+    within_tolerance_since_ = Clock::time_point{};
+}
+
+bool MissionRunner::fail(const std::string& reason)
+{
+    transition(MissionState::Error, reason);
+    return false;
 }
 
 }  // namespace altctl

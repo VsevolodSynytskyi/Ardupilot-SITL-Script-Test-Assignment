@@ -7,6 +7,7 @@
 #include <thread>
 
 #include "altctl/drone_interface.hpp"
+#include "altctl/units.hpp"
 
 namespace altctl {
 
@@ -14,116 +15,142 @@ namespace {
 
 using Clock = std::chrono::steady_clock;
 
-double seconds_since(Clock::time_point t0)
+constexpr double kTelemetryCheckDurationS = 5.0;
+constexpr auto kTelemetryPrintInterval = std::chrono::milliseconds(500);
+constexpr double kMinUsableTelemetryRateHz = 20.0;
+
+constexpr double kOpenLoopThrustMargin = 0.10;
+constexpr double kOpenLoopTargetAltM = 4.0;
+constexpr double kOpenLoopTimeoutS = 15.0;
+constexpr double kArmGraceS = 1.0;
+constexpr int kProgressEveryTicks = 25;
+constexpr auto kReadyTimeout = std::chrono::seconds(60);
+constexpr auto kModeChangeTimeout = std::chrono::seconds(5);
+constexpr auto kDisarmTimeout = std::chrono::seconds(60);
+constexpr auto kDisarmPollInterval = std::chrono::milliseconds(200);
+
+double seconds_since(Clock::time_point start)
 {
-    return std::chrono::duration<double>(Clock::now() - t0).count();
+    return std::chrono::duration<double>(Clock::now() - start).count();
 }
 
-void wait_disarmed(DroneInterface& drone, std::chrono::seconds timeout)
+void wait_disarmed(const DroneInterface& drone, std::chrono::seconds timeout)
 {
     const auto deadline = Clock::now() + timeout;
     while (drone.state().armed && Clock::now() < deadline) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        std::this_thread::sleep_for(kDisarmPollInterval);
     }
     std::cout << (drone.state().armed ? "[diag] still armed after LAND timeout\n"
                                       : "[diag] landed and disarmed\n");
 }
 
-}  // namespace
-
-int run_telemetry_check(const Config& /*cfg*/, DroneInterface& drone)
+bool ensure_thrust_as_thrust(DroneInterface& drone)
 {
-    constexpr double kDuration = 5.0;
-    const auto n0 = drone.state().position_updates;
-    const auto t0 = Clock::now();
-    while (seconds_since(t0) < kDuration) {
-        const auto s = drone.state();
-        std::printf("[telem] t=%4.1fs alt=%6.2f m climb=%+5.2f m/s yaw=%6.1f deg armed=%d "
-                    "in_air=%d mode=%u\n",
-                    seconds_since(t0), s.alt_m, s.climb_ms, s.yaw_rad * 180.0 / M_PI, s.armed,
-                    s.in_air, s.custom_mode);
-        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    const auto guid_options = drone.get_param_int("GUID_OPTIONS");
+    if (guid_options && (*guid_options & kGuidOptionThrustAsThrust) != 0) {
+        return true;
     }
-    const double rate = (drone.state().position_updates - n0) / seconds_since(t0);
-    std::printf("[telem] LOCAL_POSITION_NED rate: %.1f Hz\n", rate);
-    return rate > 20.0 ? 0 : 1;
+    std::cout << "[diag] GUID_OPTIONS=" << (guid_options ? *guid_options : -1) << ", setting "
+              << kGuidOptionThrustAsThrust << "\n";
+    return drone.set_param_int("GUID_OPTIONS", kGuidOptionThrustAsThrust);
 }
 
-int run_open_loop_takeoff(const Config& cfg, DroneInterface& drone,
+}  // namespace
+
+int run_telemetry_check(const DroneInterface& drone)
+{
+    const auto updates_before = drone.state().position_updates;
+    const auto start = Clock::now();
+    while (seconds_since(start) < kTelemetryCheckDurationS) {
+        const auto vehicle = drone.state();
+        std::printf("[telem] t=%4.1fs alt=%6.2f m climb=%+5.2f m/s yaw=%6.1f deg armed=%d "
+                    "in_air=%d mode=%u\n",
+                    seconds_since(start), vehicle.alt_m, vehicle.climb_mps,
+                    radians_to_degrees(vehicle.yaw_rad), vehicle.armed, vehicle.in_air,
+                    vehicle.custom_mode);
+        std::this_thread::sleep_for(kTelemetryPrintInterval);
+    }
+    const double rate_hz = (drone.state().position_updates - updates_before) / seconds_since(start);
+    std::printf("[telem] LOCAL_POSITION_NED rate: %.1f Hz\n", rate_hz);
+    return rate_hz > kMinUsableTelemetryRateHz ? 0 : 1;
+}
+
+int run_open_loop_takeoff(const Config& config, DroneInterface& drone,
                           const std::atomic<bool>& stop_requested)
 {
-    // Parameters, readiness, mode, arm
-    const auto guid = drone.get_param_int("GUID_OPTIONS");
-    if (!guid || (*guid & 8) == 0) {
-        std::cout << "[diag] GUID_OPTIONS=" << (guid ? *guid : -1) << ", setting 8\n";
-        if (!drone.set_param_int("GUID_OPTIONS", 8)) {
-            return 1;
-        }
-    }
-    const auto hover = drone.get_param_float("MOT_THST_HOVER");
-    if (!hover) {
+    if (!ensure_thrust_as_thrust(drone)) {
         return 1;
     }
-    std::printf("[diag] GUID_OPTIONS=%d MOT_THST_HOVER=%.3f\n", *drone.get_param_int("GUID_OPTIONS"),
-                *hover);
-    if (!drone.wait_ready(std::chrono::seconds(60)) ||
-        !drone.set_mode(CopterMode::Guided, std::chrono::seconds(5))) {
+    const auto hover_thrust = drone.get_param_float("MOT_THST_HOVER");
+    if (!hover_thrust) {
+        return 1;
+    }
+    std::printf("[diag] MOT_THST_HOVER=%.3f\n", *hover_thrust);
+    if (!drone.wait_ready(kReadyTimeout) || !drone.set_mode(CopterMode::Guided, kModeChangeTimeout)) {
         return 1;
     }
     std::cout << "[diag] GUIDED confirmed\n";
     if (!drone.arm()) {
         return 1;
     }
-    const auto t_arm = Clock::now();
+    const auto armed_at = Clock::now();
     std::cout << "[diag] armed, streaming thrust\n";
 
     // Fixed-rate stream, fresh command every tick
-    const double thrust = std::min(static_cast<double>(*hover) + 0.10, cfg.thrust_max);
-    const double yaw_hold = drone.state().yaw_rad;
-    const auto period = std::chrono::duration_cast<Clock::duration>(
-        std::chrono::duration<double>(1.0 / cfg.control_rate_hz));
-    auto next = Clock::now();
-    auto last_tick = next;
-    double max_dt = 0.0;
-    double liftoff_s = -1.0;
-    int ticks = 0;
-    bool ok = true;
+    const double thrust =
+        std::min(static_cast<double>(*hover_thrust) + kOpenLoopThrustMargin, config.thrust_max);
+    const double yaw_hold_rad = drone.state().yaw_rad;
+    const auto control_period = std::chrono::duration_cast<Clock::duration>(
+        std::chrono::duration<double>(1.0 / config.control_rate_hz));
+    auto next_tick = Clock::now();
+    auto previous_tick = next_tick;
+    double max_loop_period_s = 0.0;
+    double liftoff_after_s = -1.0;
+    int commands_sent = 0;
+    int failed_sends = 0;
+    bool reached_target = false;
     while (true) {
-        const auto s = drone.state();
-        if (!s.armed && seconds_since(t_arm) > 1.0) {
+        const auto vehicle = drone.state();
+        if (!vehicle.armed && seconds_since(armed_at) > kArmGraceS) {
             std::cout << "[diag] DISARMED during open-loop takeoff\n";
-            ok = false;
             break;
         }
-        if (liftoff_s < 0 && s.alt_m > cfg.liftoff_alt_m) {
-            liftoff_s = seconds_since(t_arm);
+        if (liftoff_after_s < 0 && vehicle.alt_m > config.liftoff_alt_m) {
+            liftoff_after_s = seconds_since(armed_at);
         }
-        if (s.alt_m > 4.0 || stop_requested || seconds_since(t_arm) > 15.0) {
-            ok = s.alt_m > 4.0;
+        reached_target = vehicle.alt_m > kOpenLoopTargetAltM;
+        if (reached_target || stop_requested || seconds_since(armed_at) > kOpenLoopTimeoutS) {
             break;
         }
-        drone.send_thrust(thrust, yaw_hold);
-        ++ticks;
+        if (!drone.send_thrust(thrust, yaw_hold_rad)) {
+            ++failed_sends;
+        }
+        ++commands_sent;
 
         const auto now = Clock::now();
-        max_dt = std::max(max_dt, std::chrono::duration<double>(now - last_tick).count());
-        last_tick = now;
-        if (ticks % 25 == 0) {
+        max_loop_period_s =
+            std::max(max_loop_period_s, std::chrono::duration<double>(now - previous_tick).count());
+        previous_tick = now;
+        if (commands_sent % kProgressEveryTicks == 0) {
             std::printf("[diag] t=%5.2fs thrust=%.3f alt=%5.2f climb=%+5.2f in_air=%d\n",
-                        seconds_since(t_arm), thrust, s.alt_m, s.climb_ms, s.in_air);
+                        seconds_since(armed_at), thrust, vehicle.alt_m, vehicle.climb_mps,
+                        vehicle.in_air);
         }
-        next += period;
-        std::this_thread::sleep_until(next);
+        next_tick += control_period;
+        std::this_thread::sleep_until(next_tick);
     }
-    const double elapsed = seconds_since(t_arm);
+    const double elapsed_s = seconds_since(armed_at);
     std::printf("[diag] %s: liftoff(>%.1f m) at %.2fs, end alt=%.2f m at %.2fs, "
-                "%d cmds (%.1f Hz), max loop dt=%.1f ms\n",
-                ok ? "OK" : "FAILED", cfg.liftoff_alt_m, liftoff_s, drone.state().alt_m, elapsed,
-                ticks, ticks / elapsed, max_dt * 1000.0);
+                "%d cmds (%.1f Hz, %d failed), max loop dt=%.1f ms\n",
+                reached_target ? "OK" : "FAILED", config.liftoff_alt_m, liftoff_after_s,
+                drone.state().alt_m, elapsed_s, commands_sent, commands_sent / elapsed_s,
+                failed_sends, max_loop_period_s * 1000.0);
 
-    drone.land();
-    wait_disarmed(drone, std::chrono::seconds(60));
-    return ok ? 0 : 1;
+    if (!drone.land()) {
+        return 1;
+    }
+    wait_disarmed(drone, kDisarmTimeout);
+    return reached_target ? 0 : 1;
 }
 
 }  // namespace altctl

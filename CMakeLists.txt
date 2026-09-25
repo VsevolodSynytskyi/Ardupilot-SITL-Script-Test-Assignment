@@ -47,8 +47,10 @@ if(BUILD_TESTS)
   add_executable(unit_tests
     tests/test_pid_controller.cpp
     tests/test_altitude_controller.cpp
+    tests/test_config.cpp
   )
   target_link_libraries(unit_tests PRIVATE altctl_core GTest::gtest_main)
+  target_compile_definitions(unit_tests PRIVATE ALTCTL_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
   include(GoogleTest)
   gtest_discover_tests(unit_tests)
 endif()
