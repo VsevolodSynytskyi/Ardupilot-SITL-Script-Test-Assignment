@@ -1,0 +1,9 @@
+# Python tooling for ArduPilot SITL build, MAVLink routing and test/plot scripts.
+empy==3.3.4          # ArduPilot waf build needs empy 3.x
+pexpect==4.9.0
+future==1.0.0
+lxml==6.1.3
+setuptools==65.5.0
+pymavlink==2.4.50
+MAVProxy==1.8.75
+gnureadline==8.3.3   # required by MAVProxy on macOS

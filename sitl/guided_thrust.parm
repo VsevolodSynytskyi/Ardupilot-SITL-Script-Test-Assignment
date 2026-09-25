@@ -1,0 +1,2 @@
+# Bit 3 (value 8): SET_ATTITUDE_TARGET.thrust is interpreted as direct thrust (0..1), not climb rate.
+GUID_OPTIONS 8

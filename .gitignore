@@ -1,0 +1,28 @@
+# ArduPilot source clone (reproducible, see README "Setup")
+/ardupilot/
+
+# Python
+/.venv/
+__pycache__/
+*.pyc
+
+# SITL runtime state (EEPROM, tlogs, dataflash logs, terrain cache)
+/sitl/run/
+*.tlog
+*.tlog.raw
+*.BIN
+
+# Our run logs (final CSV/plot to keep will be placed elsewhere or force-added)
+/logs/
+
+# C++ build output
+/build/
+/cmake-build-*/
+
+# Editors / OS
+.DS_Store
+.vscode/
+.idea/
+
+# Claude Code working notes (plan, findings, install log): local only
+/.claude/
