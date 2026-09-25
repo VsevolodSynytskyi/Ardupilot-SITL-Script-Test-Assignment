@@ -22,7 +22,7 @@ struct Config {
     // Mission
     double alt_high_m = 10.0;
     double alt_low_m = 5.0;
-    double hold_time_s = 10.0;         // time to hold each altitude once settled
+    double hold_time_s = 5.0;          // time to hold each altitude once settled
     double settle_tolerance_m = 0.25;  // |alt error| to count as "reached"
     double settle_time_s = 2.0;        // ... continuously for this long
     double state_timeout_s = 60.0;     // climb/descend must settle within this
