@@ -10,7 +10,6 @@ A C++ program that controls the altitude of an ArduCopter in SITL using thrust c
 
 - **Control:** a cascaded PID controller calculates the thrust. The program sends it to ArduPilot 50 times per second in `SET_ATTITUDE_TARGET` messages, with the attitude kept level. With `GUID_OPTIONS=8`, ArduPilot applies this value directly as motor thrust.
 - **Stack:** C++17, MAVSDK v4, CMake, GoogleTest. Python only for plots and SITL test scripts.
-- **Result:** overshoot ≈ 0.02 m, hold error ≤ 6 mm in SITL.
 
 ## Quick start
 
@@ -101,39 +100,3 @@ Other parts of the code:
 - **`diagnostics.cpp`** contains the `--run telemetry` and `--run open-loop` bring-up checks.
 
 `MissionRunner` uses `DroneInterface`, `AltitudeController` and `DataLogger`. `AltitudeController` uses `PidController`. The controller classes don't depend on MAVSDK, so the unit tests in `tests/` run them against a simulated vertical-dynamics model without SITL. Config parsing is tested too.
-
-## Results
-
-Final run from wiped SITL parameters (`docs/`):
-
-![Altitude, climb rate and thrust during the mission](docs/flight.png)
-
-| | Climb to 10 m | Descend to 5 m |
-|---|---|---|
-| Overshoot | 0.020 m | 0.024 m |
-| Settling (±0.10 m) | 10.1 s after arming (incl. ~3 s spool-up) | 5.8 s |
-| Hold error, RMS / max | 0.003 / 0.006 m | 0.002 / 0.005 m |
-
-**Gains** (tuned in SITL, inner loop first):
-- `vel_kp` 0.7: a limit cycle starts at about 2.0.
-- `vel_ki` 0.15.
-- `vel_kd` 0: D only increased overshoot.
-- `alt_kp` 2.0.
-
-## Design notes
-
-Based on SITL experiments (`scripts/risk_tests.py`) and the ArduCopter source.
-
-- **Altitude:** `alt = -LOCAL_POSITION_NED.z` (NED is z-down).
-- **`type_mask = 7`:** ignores all body rates. ArduPilot rejects a mask that ignores only some of them.
-- **Command stream gaps are dangerous:** ArduPilot keeps applying the last thrust until `GUID_TIMEOUT` (set to 1 s), then holds altitude. That's why there is one loop sending fresh thrust every tick.
-- **`MOT_THST_HOVER`** is only a feedforward. The integrator absorbs the error.
-- **Trapezoidal setpoint trajectory:** a plain ramp overshot by about 0.5 m.
-- **Explicit streams:** SITL's SERIAL1 streams nothing by default, so the controller requests every message it uses. There's no MAVProxy router, because it overrode those rates.
-- **MAVSDK v4:** `MavlinkPassthrough` is deprecated, so `MavlinkDirect` sends `SET_ATTITUDE_TARGET` and `DO_SET_MODE`.
-
-## Limitations
-
-- **Tuned in noise-free SITL.** Real hardware needs lower gains and more filtering.
-- **Altitude only.** Horizontal drift is not corrected.
-- **Project paths containing spaces break `sim_vehicle.py`**, so `scripts/run_sitl.sh` starts `arducopter` directly.

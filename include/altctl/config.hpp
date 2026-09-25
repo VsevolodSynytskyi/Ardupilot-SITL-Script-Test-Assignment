@@ -36,7 +36,7 @@ struct Config {
     double setpoint_accel_mps2 = 0.7;
 
     // Inner loop: climb-rate error -> thrust correction around hover
-    PidGains velocity_pid{0.7, 0.15, 0.0, 5.0, 0.15, -0.3, 0.3};  // tuned in SITL, see README
+    PidGains velocity_pid{0.7, 0.15, 0.0, 5.0, 0.15, -0.3, 0.3};  // tuned in SITL, see config/mission.conf
     double thrust_min = 0.10;
     double thrust_max = 0.80;
     double liftoff_alt_m = 0.3;           // take-off phase ends this far above the ground
