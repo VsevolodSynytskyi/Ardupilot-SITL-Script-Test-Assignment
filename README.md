@@ -2,7 +2,7 @@
 
 A controller that flies an ArduCopter SITL drone using **thrust-only** `SET_ATTITUDE_TARGET` commands (`GUID_OPTIONS=8`). Mission: arm → GUIDED → climb to 10 m → hold → descend to 5 m → hold → LAND, with PID altitude control.
 
-**Status:** SITL environment and risk validation done; C++ controller in progress.
+**Status:** the full mission runs end to end in SITL. Tuning, plotting and robustness polish are in progress.
 
 ## Requirements
 
@@ -56,7 +56,7 @@ scripts/run_sitl.sh --wipe        # SITL + MAVLink router; --wipe resets params
 Controller (with SITL running):
 
 ```bash
-./build/altitude_control                       # full mission, uses config/mission.conf
+./build/altitude_control                       # full mission, uses config/mission.conf, logs to logs/flight.csv
 ./build/altitude_control --set vel_kp=0.06     # override single values
 ./build/altitude_control --run telemetry       # bring-up: print altitude/mode, check 50 Hz rate
 ./build/altitude_control --run open-loop       # bring-up: GUIDED, arm, fixed thrust to 4 m, LAND
@@ -104,6 +104,7 @@ These come from SITL experiments (`scripts/risk_tests.py`) and the ArduCopter so
 - **Takeoff:** thrust-only works from the ground. Positive thrust releases ArduPilot's landed state. Liftoff comes ~3 s after arming (motor spool-up) and must happen within `DISARM_DELAY` (10 s).
 - **Hover thrust:** `MOT_THST_HOVER` (~0.36–0.39, re-learned in flight) is only a feedforward. Thrust is very sensitive (≈25 m/s² per unit), so the velocity loop needs an integrator.
 - **Stream gaps:** until `GUID_TIMEOUT` expires, ArduPilot keeps applying the **last thrust**, so a stall is dangerous. After the timeout it levels out and holds altitude. We send at 50 Hz, switch to LAND if our loop stalls > 0.5 s, and set `GUID_TIMEOUT 1` as an autopilot-side backstop.
+- **Mission:** `INIT → SET_PARAMS → SET_GUIDED → ARM → CLIMB_TO_HIGH → HOLD_HIGH → DESCEND_TO_LOW → HOLD_LOW → LAND → DONE`. A target counts as reached when |error| < 0.25 m for 2 s, then it is held for 10 s. Any of these goes to `ERROR → LAND`: a climb or descent taking over 60 s, a loop stall or stale telemetry (> 0.5 s), an unexpected disarm, an external mode change, altitude above 15 m, or Ctrl+C.
 - **Controller:** a cascade. A trapezoidal setpoint trajectory (rate, acceleration and braking limited) feeds an outer P loop on altitude, with the trajectory velocity as feedforward. That gives a climb-rate setpoint for an inner PID on climb rate, whose output is a correction added to `MOT_THST_HOVER`. The PID uses derivative on measurement, a low-pass filtered D, clamping anti-windup, and an integrator frozen below 0.3 m (on the ground). A plain rate-limited ramp overshot ~0.5 m on the model, because the feedforward stops abruptly.
 - **MAVProxy router:** runs with `--streamrate=-1`. Otherwise it keeps re-requesting 4 Hz stream rates and overrides the 50 Hz the controller asks for.
 - **MAVSDK v4:** `MavlinkPassthrough` is deprecated. `SET_ATTITUDE_TARGET` and `DO_SET_MODE` go through its replacement, `MavlinkDirect`.

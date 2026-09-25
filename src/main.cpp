@@ -4,8 +4,10 @@
 #include <string>
 
 #include "altctl/config.hpp"
+#include "altctl/data_logger.hpp"
 #include "altctl/diagnostics.hpp"
 #include "altctl/drone_interface.hpp"
+#include "altctl/mission_runner.hpp"
 
 namespace {
 
@@ -71,6 +73,16 @@ int main(int argc, char** argv)
     if (run == "open-loop") {
         return altctl::run_open_loop_takeoff(cfg, drone, g_stop);
     }
-    std::cerr << "--run " << run << ": not implemented yet\n";
+    if (run == "mission") {
+        altctl::DataLogger logger;
+        if (!logger.open(cfg.log_path)) {
+            std::cerr << "cannot open log " << cfg.log_path << "\n";
+            return 1;
+        }
+        std::cout << "[main] logging to " << cfg.log_path << "\n";
+        altctl::MissionRunner mission(cfg, drone, logger, g_stop);
+        return mission.run();
+    }
+    usage(argv[0]);
     return 2;
 }

@@ -20,11 +20,13 @@ public:
         AltitudeController::Output ctl;
     };
 
-    bool open(const std::string& path);
+    bool open(const std::string& path);  // creates parent directories
     void write(const Row& row);
+    const std::string& path() const { return path_; }
 
 private:
     std::ofstream out_;
+    std::string path_;
 };
 
 }  // namespace altctl

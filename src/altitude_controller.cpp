@@ -45,6 +45,11 @@ AltitudeController::Output AltitudeController::update(double target_alt_m, doubl
         ramp_rate_ms_ = 0.0;
     }
     ramped_setpoint_m_ += step;
+    // On the ground (motors spooling, ~3 s in SITL) the vehicle cannot follow yet: keep the
+    // setpoint just above it instead of letting it run metres ahead and cause a lunge at liftoff.
+    if (alt_m < cfg_.liftoff_alt_m) {
+        ramped_setpoint_m_ = std::min(ramped_setpoint_m_, alt_m + cfg_.liftoff_alt_m);
+    }
     const double ramp_rate = ramp_rate_ms_;
     out.alt_setpoint_m = ramped_setpoint_m_;
 

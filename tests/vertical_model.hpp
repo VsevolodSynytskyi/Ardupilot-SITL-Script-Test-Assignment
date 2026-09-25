@@ -11,6 +11,8 @@ struct VerticalModel {
     double hover_true = 0.36;
     double lag_tau_s = 0.1;
     double g = 9.81;
+    double spool_delay_s = 0.0;  // no thrust for this long after start (ArduPilot spool-up)
+    double t_s = 0.0;
 
     double alt_m = 0.0;
     double climb_ms = 0.0;
@@ -18,6 +20,10 @@ struct VerticalModel {
 
     void step(double thrust_cmd, double dt)
     {
+        t_s += dt;
+        if (t_s < spool_delay_s) {
+            thrust_cmd = 0.0;
+        }
         thrust_eff += (thrust_cmd - thrust_eff) * std::min(1.0, dt / lag_tau_s);
         const double accel = g * (thrust_eff / hover_true - 1.0);
         climb_ms += accel * dt;

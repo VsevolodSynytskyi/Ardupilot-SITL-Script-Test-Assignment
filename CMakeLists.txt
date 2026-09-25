@@ -25,6 +25,8 @@ add_executable(altitude_control
   src/main.cpp
   src/drone_interface.cpp
   src/diagnostics.cpp
+  src/mission_runner.cpp
+  src/data_logger.cpp
 )
 target_link_libraries(altitude_control PRIVATE altctl_core MAVSDK::mavsdk)
 target_compile_options(altitude_control PRIVATE -Wall -Wextra)

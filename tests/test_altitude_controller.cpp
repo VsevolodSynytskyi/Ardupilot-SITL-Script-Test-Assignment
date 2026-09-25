@@ -61,6 +61,7 @@ int zero_crossings(const Trace& tr, double target, size_t from)
 TEST(AltitudeController, SetpointTrajectoryRespectsRateAndAccel)
 {
     Config cfg;
+    cfg.liftoff_alt_m = -1.0;  // profile only: disable the on-ground setpoint hold
     AltitudeController ctl(cfg, 0.39);
     ctl.reset(0.0);
     double prev_sp = 0.0;
@@ -131,6 +132,8 @@ TEST(AltitudeController, IntegratorFrozenOnGround)
     }
     EXPECT_TRUE(out.integrator_frozen);
     EXPECT_DOUBLE_EQ(out.vel_terms.i, 0.0);
+    EXPECT_LE(out.alt_setpoint_m, cfg.liftoff_alt_m + 1e-12) << "setpoint ran ahead on the ground";
+    EXPECT_GT(out.thrust, 0.39) << "must command more than hover to lift off";
     out = ctl.update(10.0, cfg.liftoff_alt_m + 0.1, 1.0, kDt);
     EXPECT_FALSE(out.integrator_frozen);
 }
@@ -145,6 +148,7 @@ TEST_P(CascadeOnModel, ClimbHoldDescendHold)
     Config cfg;
     VerticalModel model;
     model.hover_true = GetParam();
+    model.spool_delay_s = 3.0;  // as measured in SITL: liftoff ~3 s after arming
     AltitudeController ctl(cfg, /*hover_feedforward=*/0.39);
     ctl.reset(model.alt_m);
 
@@ -152,7 +156,7 @@ TEST_P(CascadeOnModel, ClimbHoldDescendHold)
     const double peak = *std::max_element(climb.alt.begin(), climb.alt.end());
     const double t_settle_up = settling_time(climb, cfg.alt_high_m, cfg.settle_tolerance_m);
     EXPECT_LT(peak - cfg.alt_high_m, 0.3) << "overshoot";
-    EXPECT_LT(t_settle_up, 12.0);
+    EXPECT_LT(t_settle_up, 15.0);  // includes the 3 s spool-up
     const size_t tail = climb.alt.size() - static_cast<size_t>(5.0 / kDt);
     EXPECT_LE(zero_crossings(climb, cfg.alt_high_m, tail), 1) << "oscillating at hold";
     EXPECT_NEAR(climb.alt.back(), cfg.alt_high_m, 0.05);
