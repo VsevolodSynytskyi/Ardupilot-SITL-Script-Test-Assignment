@@ -121,21 +121,38 @@ TEST(AltitudeController, ThrustWithinLimits)
     }
 }
 
-TEST(AltitudeController, IntegratorFrozenOnGround)
+TEST(AltitudeController, TakeoffPhaseOnGround)
+{
+    Config cfg;
+    const double ground = 0.2;  // EKF altitude of the ground is not necessarily 0
+    AltitudeController ctl(cfg, 0.39);
+    ctl.reset(ground);
+    AltitudeController::Output out;
+    for (int k = 0; k < 150; ++k) {  // 3 s sitting on the ground (spool-up), climb = 0
+        out = ctl.update(ground + 10.0, ground, 0.0, kDt);
+        EXPECT_DOUBLE_EQ(out.thrust, 0.39 + cfg.takeoff_thrust_margin);
+    }
+    EXPECT_TRUE(out.integrator_frozen);
+    EXPECT_DOUBLE_EQ(out.vel_terms.i, 0.0);
+    // just below the liftoff height (relative to the ground reference): still take-off phase
+    out = ctl.update(ground + 10.0, ground + cfg.liftoff_alt_m - 0.01, 0.5, kDt);
+    EXPECT_TRUE(out.integrator_frozen);
+}
+
+TEST(AltitudeController, BumplessHandoverAtLiftoff)
 {
     Config cfg;
     AltitudeController ctl(cfg, 0.39);
     ctl.reset(0.0);
-    AltitudeController::Output out;
-    for (int k = 0; k < 150; ++k) {  // 3 s sitting on the ground (spool-up), climb = 0
-        out = ctl.update(10.0, 0.0, 0.0, kDt);
-    }
-    EXPECT_TRUE(out.integrator_frozen);
-    EXPECT_DOUBLE_EQ(out.vel_terms.i, 0.0);
-    EXPECT_LE(out.alt_setpoint_m, cfg.liftoff_alt_m + 1e-12) << "setpoint ran ahead on the ground";
-    EXPECT_GT(out.thrust, 0.39) << "must command more than hover to lift off";
-    out = ctl.update(10.0, cfg.liftoff_alt_m + 0.1, 1.0, kDt);
+    const double alt = cfg.liftoff_alt_m + 0.01;
+    const double climb = 1.0;
+    const auto out = ctl.update(10.0, alt, climb, kDt);
     EXPECT_FALSE(out.integrator_frozen);
+    EXPECT_NEAR(out.alt_setpoint_m, alt, 2 * climb * kDt);  // trajectory starts at the vehicle
+    EXPECT_NEAR(out.climb_setpoint_ms, climb, 0.1);  // ... at the vehicle speed (no jump)
+    EXPECT_NEAR(out.thrust, 0.39, 0.05);  // no thrust jump
+    // latched: dipping below the liftoff height does not re-enter the take-off phase
+    EXPECT_FALSE(ctl.update(10.0, 0.1, 0.0, kDt).integrator_frozen);
 }
 
 // Full mission profile on the model: climb to 10 m, hold, descend to 5 m, hold.

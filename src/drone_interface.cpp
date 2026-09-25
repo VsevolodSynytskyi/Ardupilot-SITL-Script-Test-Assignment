@@ -44,7 +44,18 @@ std::optional<double> json_number(const std::string& json, const std::string& ke
 
 DroneInterface::DroneInterface(std::string connection_url) : url_(std::move(connection_url)) {}
 
-DroneInterface::~DroneInterface() = default;
+DroneInterface::~DroneInterface()
+{
+    // Plugins (and their subscriptions) first, while mutex_/state_ that the callbacks use
+    // are still alive: members are destroyed in reverse declaration order, which would
+    // destroy mutex_ before the plugins and crash a late callback (SIGABRT on exit).
+    direct_.reset();
+    param_.reset();
+    action_.reset();
+    telemetry_.reset();
+    system_.reset();
+    mavsdk_.reset();
+}
 
 bool DroneInterface::connect(std::chrono::seconds timeout)
 {

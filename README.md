@@ -64,6 +64,15 @@ Controller (with SITL running):
 
 Wait ~20 s after starting SITL: `LOCAL_POSITION_NED` is only sent once the EKF origin is set from GPS.
 
+Plot and metrics of a flight log:
+
+```bash
+source .venv/bin/activate
+python scripts/plot.py logs/flight.csv            # -> logs/flight.png (altitude, climb rate, thrust)
+python scripts/flight_metrics.py logs/flight.csv  # overshoot, settling time, hold error
+python scripts/tune.py "vel_kp=0.5" "vel_kp=0.7"  # one mission per gain set, comparison table
+```
+
 Smoke test (GUIDED takeoff to 5 m, then LAND):
 
 ```bash
@@ -92,6 +101,8 @@ scripts/run_sitl.sh       SITL + MAVProxy router launcher
 scripts/build_mavsdk.sh   builds MAVSDK locally
 scripts/risk_tests.py     SITL experiments behind the design decisions (see "Design notes")
 scripts/sitl_smoke_test.py  environment check
+scripts/plot.py           flight plot (setpoint vs altitude, climb rate, thrust)
+scripts/flight_metrics.py, scripts/tune.py  step-response metrics, gain sweeps
 sitl/guided_thrust.parm   SITL parameters (GUID_OPTIONS, GUID_TIMEOUT); sitl/run/ = runtime state (ignored)
 ```
 
@@ -106,5 +117,11 @@ These come from SITL experiments (`scripts/risk_tests.py`) and the ArduCopter so
 - **Stream gaps:** until `GUID_TIMEOUT` expires, ArduPilot keeps applying the **last thrust**, so a stall is dangerous. After the timeout it levels out and holds altitude. We send at 50 Hz, switch to LAND if our loop stalls > 0.5 s, and set `GUID_TIMEOUT 1` as an autopilot-side backstop.
 - **Mission:** `INIT → SET_PARAMS → SET_GUIDED → ARM → CLIMB_TO_HIGH → HOLD_HIGH → DESCEND_TO_LOW → HOLD_LOW → LAND → DONE`. A target counts as reached when |error| < 0.25 m for 2 s, then it is held for 10 s. Any of these goes to `ERROR → LAND`: a climb or descent taking over 60 s, a loop stall or stale telemetry (> 0.5 s), an unexpected disarm, an external mode change, altitude above 15 m, or Ctrl+C.
 - **Controller:** a cascade. A trapezoidal setpoint trajectory (rate, acceleration and braking limited) feeds an outer P loop on altitude, with the trajectory velocity as feedforward. That gives a climb-rate setpoint for an inner PID on climb rate, whose output is a correction added to `MOT_THST_HOVER`. The PID uses derivative on measurement, a low-pass filtered D, clamping anti-windup, and an integrator frozen below 0.3 m (on the ground). A plain rate-limited ramp overshot ~0.5 m on the model, because the feedforward stops abruptly.
+- **Tuning (SITL):** inner loop first, then outer, using `scripts/tune.py`.
+  - Inner P: thrust chatter (a limit cycle) sets in at `vel_kp ≈ 2`, so 0.7 keeps a ~3× margin.
+  - Inner D: made overshoot worse, so `vel_kd = 0`. Thrust sets acceleration, so the climb-rate loop is essentially first order and needs no damping.
+  - Inner I: `vel_ki = 0.15`. Outer: `alt_kp = 2.0`.
+  - Result: overshoot 0.02–0.03 m, hold error ≤ 4 mm (RMS 1–2 mm).
+- **Take-off phase:** until 0.3 m above the arming altitude, thrust is fixed at `MOT_THST_HOVER + 0.10`, with the PID held in reset so nothing winds up on the ground. The cascade then takes over bumplessly: the trajectory starts at the current altitude and climb rate.
 - **MAVProxy router:** runs with `--streamrate=-1`. Otherwise it keeps re-requesting 4 Hz stream rates and overrides the 50 Hz the controller asks for.
 - **MAVSDK v4:** `MavlinkPassthrough` is deprecated. `SET_ATTITUDE_TARGET` and `DO_SET_MODE` go through its replacement, `MavlinkDirect`.

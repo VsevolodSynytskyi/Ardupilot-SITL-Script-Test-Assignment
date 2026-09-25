@@ -7,3 +7,4 @@ setuptools==65.5.0
 pymavlink==2.4.50
 MAVProxy==1.8.75
 gnureadline==8.3.3   # required by MAVProxy on macOS
+matplotlib==3.10.9  # scripts/plot.py

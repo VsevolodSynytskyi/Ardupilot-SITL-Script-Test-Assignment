@@ -28,7 +28,7 @@ struct Config {
     double state_timeout_s = 60.0;    // per-state timeout (climb/descend/hold)
 
     // Outer loop: altitude error -> climb-rate setpoint
-    double alt_kp = 1.0;              // (m/s) per m
+    double alt_kp = 2.0;              // (m/s) per m
     double max_climb_ms = 2.5;
     double max_descent_ms = 1.5;
     double setpoint_rate_up_ms = 1.5;   // altitude setpoint ramp
@@ -36,10 +36,11 @@ struct Config {
     double setpoint_accel_mss = 0.7;    // setpoint acceleration/braking
 
     // Inner loop: climb-rate error -> thrust correction around hover
-    PidGains vel{0.15, 0.05, 0.0, 5.0, 0.15, -0.3, 0.3};
+    PidGains vel{0.7, 0.15, 0.0, 5.0, 0.15, -0.3, 0.3};  // tuned in SITL (Stage 9)
     double thrust_min = 0.10;
     double thrust_max = 0.80;
-    double liftoff_alt_m = 0.3;       // integrator frozen below this altitude
+    double liftoff_alt_m = 0.3;       // take-off phase ends this far above the ground
+    double takeoff_thrust_margin = 0.10;  // take-off thrust = hover + margin
 
     // Command stream
     double control_rate_hz = 50.0;

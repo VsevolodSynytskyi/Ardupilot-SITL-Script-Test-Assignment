@@ -46,6 +46,7 @@ void Config::set(const std::string& key, const std::string& value)
         {"thrust_min", &thrust_min},
         {"thrust_max", &thrust_max},
         {"liftoff_alt_m", &liftoff_alt_m},
+        {"takeoff_thrust_margin", &takeoff_thrust_margin},
         {"control_rate_hz", &control_rate_hz},
         {"stream_watchdog_s", &stream_watchdog_s},
     };

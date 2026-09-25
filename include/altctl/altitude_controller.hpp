@@ -10,7 +10,8 @@ namespace altctl {
 //   outer P:   climb_sp = ramp_rate + alt_kp * (setpoint - alt), clamped to climb/descent limits
 //   inner PID: thrust correction from climb-rate error
 //   thrust = hover_thrust + correction, clamped to [thrust_min, thrust_max]
-// Below liftoff_alt_m the velocity integrator is frozen, so it cannot wind up on the ground.
+// Take-off: until liftoff_alt_m above the ground, fixed thrust hover + takeoff_thrust_margin with
+// the PID held in reset (no windup on the ground); then a bumpless hand-over to the cascade.
 class AltitudeController {
 public:
     struct Output {
@@ -23,8 +24,8 @@ public:
 
     AltitudeController(const Config& cfg, double hover_thrust);
 
-    // Start ramping from the current altitude; clears the integrator.
-    void reset(double current_alt_m);
+    // Call on the ground before take-off: sets the ground reference, clears all state.
+    void reset(double ground_alt_m);
 
     Output update(double target_alt_m, double alt_m, double climb_ms, double dt);
 
@@ -35,6 +36,8 @@ private:
     double hover_thrust_;
     double ramped_setpoint_m_ = 0.0;
     double ramp_rate_ms_ = 0.0;  // current setpoint velocity (fed forward)
+    double ground_alt_m_ = 0.0;
+    bool airborne_ = false;       // latched at liftoff
     PIDController vel_pid_;
 };
 
