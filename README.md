@@ -2,8 +2,8 @@
 
 A C++ program that controls the altitude of an ArduCopter in SITL using thrust commands only. It:
 
-1. Arms the copter.
-2. Switches to GUIDED mode.
+1. Switches to GUIDED mode.
+2. Arms the copter. Arming directly in GUIDED lets the thrust stream start right away, before ArduPilot's auto-disarm can trigger.
 3. Climbs to 10 m and holds.
 4. Descends to 5 m and holds.
 5. Switches to LAND.
