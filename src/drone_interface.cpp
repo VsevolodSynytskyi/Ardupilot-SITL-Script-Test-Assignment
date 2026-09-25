@@ -112,14 +112,27 @@ bool DroneInterface::connect(std::chrono::seconds timeout)
     param_ = std::make_unique<mavsdk::Param>(system_);
     direct_ = std::make_unique<mavsdk::MavlinkDirect>(system_);
 
-    // Telemetry rates (MAV_CMD_SET_MESSAGE_INTERVAL under the hood)
-    const auto r1 = telemetry_->set_rate_position_velocity_ned(kTelemetryRateHz);
-    const auto r2 = telemetry_->set_rate_attitude_euler(kTelemetryRateHz);
-    const auto r3 = telemetry_->set_rate_in_air(10.0);
-    if (r1 != mavsdk::Telemetry::Result::Success || r2 != mavsdk::Telemetry::Result::Success ||
-        r3 != mavsdk::Telemetry::Result::Success) {
-        std::cerr << "[drone] warning: set telemetry rate: " << r1 << ", " << r2 << ", " << r3
-                  << "\n";
+    // Request every stream we depend on (MAV_CMD_SET_MESSAGE_INTERVAL under the hood). A SITL
+    // SERIAL port other than SERIAL0 has all default stream rates at 0, so nothing is implied.
+    struct RateRequest {
+        const char* what;
+        mavsdk::Telemetry::Result (mavsdk::Telemetry::*set)(double) const;
+        double hz;
+    };
+    const RateRequest requests[] = {
+        {"LOCAL_POSITION_NED", &mavsdk::Telemetry::set_rate_position_velocity_ned, kTelemetryRateHz},
+        {"ATTITUDE", &mavsdk::Telemetry::set_rate_attitude_euler, kTelemetryRateHz},
+        {"EXTENDED_SYS_STATE", &mavsdk::Telemetry::set_rate_in_air, 10.0},
+        {"SYS_STATUS (health)", &mavsdk::Telemetry::set_rate_health, 2.0},
+        {"GLOBAL_POSITION_INT", &mavsdk::Telemetry::set_rate_position, 5.0},
+        {"GPS_RAW_INT", &mavsdk::Telemetry::set_rate_gps_info, 2.0},
+        {"HOME_POSITION", &mavsdk::Telemetry::set_rate_home, 1.0},
+    };
+    for (const auto& r : requests) {
+        const auto res = ((*telemetry_).*(r.set))(r.hz);
+        if (res != mavsdk::Telemetry::Result::Success) {
+            std::cerr << "[drone] warning: rate request " << r.what << ": " << res << "\n";
+        }
     }
 
     telemetry_->subscribe_position_velocity_ned([this](mavsdk::Telemetry::PositionVelocityNed pv) {

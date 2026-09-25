@@ -14,6 +14,13 @@ m = mavutil.mavlink_connection(URL, source_system=250)
 m.wait_heartbeat(timeout=30)
 print(f"heartbeat: sys={m.target_system} comp={m.target_component}")
 
+# SITL serial ports other than SERIAL0 stream nothing by default: request what we read.
+for msg_id, hz in ((mavutil.mavlink.MAVLINK_MSG_ID_SYS_STATUS, 2),
+                   (mavutil.mavlink.MAVLINK_MSG_ID_GLOBAL_POSITION_INT, 10)):
+    m.mav.command_long_send(m.target_system, m.target_component,
+                            mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL, 0,
+                            msg_id, 1e6 / hz, 0, 0, 0, 0, 0)
+
 m.mav.param_request_read_send(m.target_system, m.target_component, b"GUID_OPTIONS", -1)
 p = m.recv_match(type="PARAM_VALUE", blocking=True, timeout=5)
 print(f"GUID_OPTIONS = {p.param_value if p else 'NO REPLY'}")

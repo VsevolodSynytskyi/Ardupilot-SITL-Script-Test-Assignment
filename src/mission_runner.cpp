@@ -5,6 +5,10 @@
 #include <cstdio>
 #include <thread>
 
+#if defined(__APPLE__)
+#include <pthread/qos.h>
+#endif
+
 #include "altctl/altitude_controller.hpp"
 #include "altctl/data_logger.hpp"
 #include "altctl/drone_interface.hpp"
@@ -157,6 +161,11 @@ bool MissionRunner::prepare()
 
 MissionRunner::FlightResult MissionRunner::fly()
 {
+#if defined(__APPLE__)
+    // macOS coalesces timers of ordinary background processes (loop gaps up to ~100 ms seen);
+    // the control loop is latency-sensitive.
+    pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+#endif
     AltitudeController ctl(cfg_, hover_thrust_);
     const auto s0 = drone_.state();
     ctl.reset(s0.alt_m);

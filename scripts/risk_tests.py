@@ -47,6 +47,8 @@ class Link:
         for msg_id in (M.MAVLINK_MSG_ID_LOCAL_POSITION_NED, M.MAVLINK_MSG_ID_ATTITUDE,
                        M.MAVLINK_MSG_ID_GLOBAL_POSITION_INT, M.MAVLINK_MSG_ID_EXTENDED_SYS_STATE):
             self.command(M.MAV_CMD_SET_MESSAGE_INTERVAL, msg_id, 20000)  # 50 Hz
+        # SITL serial ports other than SERIAL0 stream nothing by default
+        self.command(M.MAV_CMD_SET_MESSAGE_INTERVAL, M.MAVLINK_MSG_ID_SYS_STATUS, 500000)
         self.rows = []
 
     def command(self, cmd, *params):

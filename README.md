@@ -63,7 +63,7 @@ brew install cmake
 git clone --recurse-submodules --shallow-submodules --depth 1 \
     https://github.com/ArduPilot/ardupilot.git ardupilot
 
-# Python environment: SITL build tooling, MAVProxy, pymavlink, matplotlib
+# Python environment: SITL build tooling, pymavlink, matplotlib
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 
@@ -83,7 +83,7 @@ ArduPilot's `install-prereqs-mac.sh` isn't needed: the packages in `requirements
 
 ## Running
 
-Start SITL. It runs the `arducopter` binary plus a MAVProxy instance that routes MAVLink to two UDP ports:
+Start SITL. The `arducopter` binary sends MAVLink straight to two UDP ports, with no router in between:
 
 ```bash
 scripts/run_sitl.sh --wipe        # --wipe resets parameters to defaults + sitl/guided_thrust.parm
@@ -91,8 +91,10 @@ scripts/run_sitl.sh --wipe        # --wipe resets parameters to defaults + sitl/
 
 | Endpoint | Use |
 |---|---|
-| `udp:127.0.0.1:14550` | ground station (QGroundControl connects automatically) or `mavproxy.py --master udp:127.0.0.1:14550` |
-| `udp:127.0.0.1:14551` | the controller and test scripts |
+| `udp:127.0.0.1:14550` (SERIAL0) | ground station: QGroundControl connects automatically |
+| `udp:127.0.0.1:14551` (SERIAL1) | the controller and the Python test scripts |
+
+Each port serves one client.
 
 `sitl/guided_thrust.parm` sets `GUID_OPTIONS 8` and `GUID_TIMEOUT 1`. Give SITL about 20 s after start: `LOCAL_POSITION_NED` is only sent once the EKF origin is set from GPS.
 
@@ -120,7 +122,7 @@ Fault-injection tests (SITL running):
 python scripts/fault_tests.py   # early_interrupt, armed_start, mode_change, stall, link_loss
 ```
 
-`link_loss` freezes the MAVProxy router for 3 s, and the router's stream stays bursty for a while afterwards. The controller then refuses to fly or lands early, so restart `scripts/run_sitl.sh` before the next flight.
+`link_loss` puts a small UDP relay between SITL and the controller and drops all packets for 3 s. The ground-station link stays up, so the test can check that ArduPilot holds altitude during the outage.
 
 ## Design notes
 
@@ -133,7 +135,7 @@ These come from experiments in SITL (`scripts/risk_tests.py`) and from reading t
 - **Hover thrust:** `MOT_THST_HOVER` (0.36–0.39, re-learned in flight) is only a feedforward. Thrust is very sensitive (about 25 m/s² per unit), so the climb-rate loop needs an integrator.
 - **Command stream gaps are dangerous:** until `GUID_TIMEOUT` expires, ArduPilot keeps applying the last thrust it received. After the timeout it levels out and holds altitude. The controller therefore sends a freshly computed thrust every tick from a single 50 Hz loop (no separate sender repeating stale values), and lands if the loop stalls for more than 0.5 s. `GUID_TIMEOUT 1` is a backstop on the autopilot side.
 - **Setpoint trajectory:** a plain rate-limited ramp overshot by about 0.5 m, because its speed feedforward drops to zero in one tick. The trapezoidal profile brakes early enough to arrive with zero speed.
-- **MAVProxy** runs with `--streamrate=-1`. Otherwise it keeps re-requesting 4 Hz stream rates, overriding the 50 Hz the controller asks for.
+- **Telemetry streams are requested explicitly.** On SITL's SERIAL1 all default stream rates are 0, so the controller asks for every message it relies on: position at 50 Hz, attitude, SYS_STATUS, GPS, home, landed state. A MAVProxy router between SITL and the controller was dropped: it overrode the requested rates with 4 Hz, and after a stall its stream stayed bursty. On macOS the control thread runs at the `USER_INTERACTIVE` QoS class, because timer coalescing otherwise delays some ticks by up to 100 ms.
 - **MAVSDK v4:** `MavlinkPassthrough` is deprecated, so `SET_ATTITUDE_TARGET` and `DO_SET_MODE` go through its replacement, `MavlinkDirect`. Telemetry, Param and Action cover the rest. `Action::land()` sends `MAV_CMD_NAV_LAND`, which switches ArduCopter to LAND.
 
 ## Tuning and results
@@ -163,7 +165,7 @@ config/mission.conf         mission and controller settings
 include/altctl/, src/       controller
 tests/                      unit tests: PID, and the cascade on a vertical-dynamics model
 requirements.txt            Python dependencies
-scripts/run_sitl.sh         SITL + MAVProxy router
+scripts/run_sitl.sh         SITL launcher (UDP 14550 / 14551)
 scripts/build_mavsdk.sh     local MAVSDK build
 scripts/plot.py             flight plot
 scripts/flight_metrics.py   step-response metrics from a flight log
@@ -174,12 +176,6 @@ scripts/sitl_smoke_test.py  quick SITL check: GUIDED take-off to 5 m and land
 sitl/guided_thrust.parm     SITL parameters; sitl/run/ holds runtime state
 ```
 
-## Known issues: paths with spaces
+## Known issues
 
-If the project path contains a space:
-
-- **`sim_vehicle.py`** crashes SITL (`PANIC: Failed to load defaults`), because it splits the `--defaults` argument. `scripts/run_sitl.sh` runs the `arducopter` binary directly with relative paths to avoid it.
-- **venv scripts** (`mavproxy.py` etc.) fail with `bad interpreter`. Fix the shebangs after each `pip install`:
-  ```bash
-  sed -i '' '1s|^#!.*/\.venv/bin/python.*|#!/usr/bin/env python3|' .venv/bin/*
-  ```
+- **Paths with spaces:** `sim_vehicle.py` crashes SITL (`PANIC: Failed to load defaults`), because it splits the `--defaults` argument. `scripts/run_sitl.sh` therefore runs the `arducopter` binary directly with relative paths to avoid it.
