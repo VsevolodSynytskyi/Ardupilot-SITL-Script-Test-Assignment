@@ -1,5 +1,6 @@
-# ArduPilot source clone (reproducible, see README "Setup")
+# Third-party sources/builds (reproducible, see README "Setup")
 /ardupilot/
+/third_party/
 
 # Python
 /.venv/

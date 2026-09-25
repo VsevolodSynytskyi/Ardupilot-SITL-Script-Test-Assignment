@@ -1,2 +1,5 @@
 # Bit 3 (value 8): SET_ATTITUDE_TARGET.thrust is interpreted as direct thrust (0..1), not climb rate.
 GUID_OPTIONS 8
+# Stale-command safety net: while the stream is interrupted ArduPilot keeps applying the last
+# thrust; after GUID_TIMEOUT it levels and holds altitude. Default 3 s, range 0.1-5.
+GUID_TIMEOUT 1
