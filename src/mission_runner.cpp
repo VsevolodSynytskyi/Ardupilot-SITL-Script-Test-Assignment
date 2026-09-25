@@ -1,5 +1,6 @@
 #include "altctl/mission_runner.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -32,6 +33,10 @@ constexpr double kMinTelemetryRateHz = 25.0;
 constexpr double kArmGraceS = 1.0;
 // How long LAND is retried (e.g. while the link is down) before giving up.
 constexpr double kLandCommandRetryS = 30.0;
+// Abort if the vehicle climbs this far above the high target.
+constexpr double kAltitudeLimitMarginM = 5.0;
+// GUID_OPTIONS bit 3: SET_ATTITUDE_TARGET.thrust is thrust, not a climb-rate request.
+constexpr int32_t kGuidOptionThrustAsThrust = 8;
 
 }  // namespace
 
@@ -103,15 +108,16 @@ bool MissionRunner::prepare()
     }
     transition(MissionState::SetParams, "");
     auto guid = drone_.get_param_int("GUID_OPTIONS");
-    if (!guid || (*guid & 8) == 0) {
-        std::printf("[mission] GUID_OPTIONS=%d, setting 8 (thrust as thrust)\n", guid ? *guid : -1);
-        if (!drone_.set_param_int("GUID_OPTIONS", 8)) {
+    if (!guid || (*guid & kGuidOptionThrustAsThrust) == 0) {
+        std::printf("[mission] GUID_OPTIONS=%d, setting %d (thrust as thrust)\n", guid ? *guid : -1,
+                    kGuidOptionThrustAsThrust);
+        if (!drone_.set_param_int("GUID_OPTIONS", kGuidOptionThrustAsThrust)) {
             return fail("cannot set GUID_OPTIONS");
         }
         guid = drone_.get_param_int("GUID_OPTIONS");
     }
-    if (!guid || (*guid & 8) == 0) {
-        return fail("GUID_OPTIONS readback is not 8");
+    if (!guid || (*guid & kGuidOptionThrustAsThrust) == 0) {
+        return fail("GUID_OPTIONS readback does not have bit 3 set");
     }
     const auto hover = drone_.get_param_float("MOT_THST_HOVER");
     if (!hover || *hover < 0.1f || *hover > 0.8f) {
@@ -127,12 +133,15 @@ bool MissionRunner::prepare()
     }
 
     // The controller needs fresh altitude every tick; never arm on a slow telemetry stream
-    // (seen in SITL after a router stall: ~3 Hz, bang-bang thrust). Right after SITL start the
-    // stream may not flow yet even though the health flags are OK, so wait for it.
+    // (flying on ~3 Hz position data gives bang-bang thrust). Right after SITL start the stream
+    // may not flow yet even though the health flags are OK, so wait for it.
     double rate = drone_.measure_position_rate(std::chrono::milliseconds(1000));
     const auto rate_deadline = Clock::now() + std::chrono::seconds(60);
-    while (rate < kMinTelemetryRateHz && Clock::now() < rate_deadline && !stop_requested_) {
-        std::printf("[mission] waiting for telemetry: LOCAL_POSITION_NED at %.1f Hz\n", rate);
+    for (int attempt = 0;
+         rate < kMinTelemetryRateHz && Clock::now() < rate_deadline && !stop_requested_; ++attempt) {
+        if (attempt % 4 == 0) {
+            std::printf("[mission] waiting for telemetry: LOCAL_POSITION_NED at %.1f Hz\n", rate);
+        }
         rate = drone_.measure_position_rate(std::chrono::milliseconds(1500), true);
     }
     if (stop_requested_) {
@@ -171,13 +180,17 @@ MissionRunner::FlightResult MissionRunner::fly()
     ctl.reset(s0.alt_m);
     const double yaw_hold = s0.yaw_rad;  // level attitude, heading held from arming
     const double ground_alt = s0.alt_m;
-    const double max_alt = cfg_.alt_high_m + 5.0;
+    const double max_alt = ground_alt + cfg_.alt_high_m + kAltitudeLimitMarginM;
 
     const auto period = std::chrono::duration_cast<Clock::duration>(
         std::chrono::duration<double>(1.0 / cfg_.control_rate_hz));
     const auto t_start = Clock::now();
     auto t_state = t_start;       // entry time of current state
     auto t_in_tol = Clock::time_point{};  // since when |error| < tolerance (0 = not in tolerance)
+    auto target_of = [this](MissionState st) {
+        return st == MissionState::ClimbToHigh || st == MissionState::HoldHigh ? cfg_.alt_high_m
+                                                                               : cfg_.alt_low_m;
+    };
     auto last_tick = t_start;
     auto next_tick = t_start;
     auto last_send_ok = t_start;
@@ -227,10 +240,7 @@ MissionRunner::FlightResult MissionRunner::fly()
         }
 
         // --- state machine -------------------------------------------------------------
-        const bool climbing_or_holding_high =
-            state_ == MissionState::ClimbToHigh || state_ == MissionState::HoldHigh;
-        const double target = climbing_or_holding_high ? cfg_.alt_high_m : cfg_.alt_low_m;
-        const double error = target - (s.alt_m - ground_alt);
+        const double error = target_of(state_) - (s.alt_m - ground_alt);
         if (std::abs(error) < cfg_.settle_tolerance_m) {
             if (t_in_tol == Clock::time_point{}) {
                 t_in_tol = now;
@@ -280,10 +290,7 @@ MissionRunner::FlightResult MissionRunner::fly()
         }
 
         // --- control + command ------------------------------------------------------------
-        const double target_now =
-            (state_ == MissionState::ClimbToHigh || state_ == MissionState::HoldHigh)
-                ? cfg_.alt_high_m
-                : cfg_.alt_low_m;
+        const double target_now = target_of(state_);  // state may have changed above
         const auto out = ctl.update(ground_alt + target_now, s.alt_m, s.climb_ms, ticks ? dt : 0.0);
         if (drone_.send_thrust(out.thrust, yaw_hold)) {
             last_send_ok = now;

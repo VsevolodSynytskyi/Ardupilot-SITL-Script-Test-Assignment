@@ -22,11 +22,9 @@ public:
 
     bool open(const std::string& path);  // creates parent directories
     void write(const Row& row);
-    const std::string& path() const { return path_; }
 
 private:
     std::ofstream out_;
-    std::string path_;
     unsigned long rows_ = 0;
 };
 

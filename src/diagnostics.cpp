@@ -52,7 +52,7 @@ int run_telemetry_check(const Config& /*cfg*/, DroneInterface& drone)
 int run_open_loop_takeoff(const Config& cfg, DroneInterface& drone,
                           const std::atomic<bool>& stop_requested)
 {
-    // Stage 5: parameters, readiness, mode, arm
+    // Parameters, readiness, mode, arm
     const auto guid = drone.get_param_int("GUID_OPTIONS");
     if (!guid || (*guid & 8) == 0) {
         std::cout << "[diag] GUID_OPTIONS=" << (guid ? *guid : -1) << ", setting 8\n";
@@ -77,7 +77,7 @@ int run_open_loop_takeoff(const Config& cfg, DroneInterface& drone,
     const auto t_arm = Clock::now();
     std::cout << "[diag] armed, streaming thrust\n";
 
-    // Stage 6: fixed-rate stream, fresh command every tick
+    // Fixed-rate stream, fresh command every tick
     const double thrust = std::min(static_cast<double>(*hover) + 0.10, cfg.thrust_max);
     const double yaw_hold = drone.state().yaw_rad;
     const auto period = std::chrono::duration_cast<Clock::duration>(

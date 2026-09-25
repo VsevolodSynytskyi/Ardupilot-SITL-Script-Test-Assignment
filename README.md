@@ -1,181 +1,108 @@
 # ArduCopter SITL: thrust-only altitude PID
 
-A C++ program that flies an ArduCopter (SITL) through a simple altitude mission, controlling it **only through thrust**. It arms the copter, switches to GUIDED, climbs to 10 m, holds, descends to 5 m, holds, and lands. Altitude is controlled by our own cascaded PID: the program streams `SET_ATTITUDE_TARGET` messages with a level attitude and a thrust value, and ArduPilot (with `GUID_OPTIONS=8`) applies that thrust directly.
+A C++ program that controls the altitude of an ArduCopter in SITL using thrust commands only. It:
 
-## How it works
+1. Arms the copter.
+2. Switches to GUIDED mode.
+3. Climbs to 10 m and holds.
+4. Descends to 5 m and holds.
+5. Switches to LAND.
 
-```
- LOCAL_POSITION_NED (50 Hz)                                    SET_ATTITUDE_TARGET (50 Hz)
- altitude, climb rate ──► AltitudeController ──► thrust ──► level attitude, held yaw, thrust
-                          │
-                          ├─ setpoint trajectory   trapezoidal: rate / acceleration / braking limited
-                          ├─ outer P  (altitude)    climb-rate setpoint = trajectory speed + kp·error
-                          └─ inner PID (climb rate) thrust = MOT_THST_HOVER + correction
-```
+- **Control:** a cascaded PID controller calculates the thrust. The program sends it to ArduPilot 50 times per second in `SET_ATTITUDE_TARGET` messages, with the attitude kept level. With `GUID_OPTIONS=8`, ArduPilot applies this value directly as motor thrust.
+- **Stack:** C++17, MAVSDK v4, CMake, GoogleTest. Python only for plots and SITL test scripts.
+- **Result:** overshoot ≈ 0.02 m, hold error ≤ 6 mm in SITL.
 
-| Component | Role |
-|---|---|
-| `DroneInterface` | MAVSDK connection: telemetry, parameters, mode changes, arming, thrust commands. Owns the NED → altitude conversion. |
-| `AltitudeController` | Cascade controller above, plus the take-off phase. |
-| `PIDController` | PID with derivative on measurement, low-pass filtered D, clamping anti-windup, output limits. |
-| `MissionRunner` | Mission state machine and the fixed-rate control loop, with safety checks. |
-| `DataLogger` | CSV log of every control tick. |
+## Quick start
 
-The mission states are:
-
-```
-INIT → SET_PARAMS → SET_GUIDED → ARM → CLIMB_TO_HIGH → HOLD_HIGH → DESCEND_TO_LOW → HOLD_LOW → LAND → DONE
-                                            any failure → ERROR → LAND
-```
-
-A target counts as reached when the altitude error stays below 0.25 m for 2 s. Each altitude is then held for 10 s.
-
-Safety checks run on every tick. Any of these switches the vehicle to LAND:
-- telemetry older than 0.2 s
-- a control-loop stall, or thrust commands failing to send, for more than 0.5 s
-- an unexpected disarm
-- altitude above 15 m
-- a climb or descent taking longer than 60 s
-- Ctrl+C (a second Ctrl+C quits immediately)
-
-The LAND command is retried for 30 s, so it still gets through after a short link loss. Meanwhile ArduPilot holds altitude, because the thrust stream has stopped.
-
-Two cases where the controller deliberately does not take control:
-- **External mode change** (an operator or ground station switched mode): the controller stops streaming and exits with code 3, leaving the vehicle to the operator.
-- **Unsafe start:** it refuses to start on an armed vehicle, and it won't arm until `LOCAL_POSITION_NED` arrives at 25 Hz or more.
-
-Exit codes: 0 mission complete, 1 error (landed), 3 control released to the operator, 130 interrupted.
-
-## Requirements
-
-- Xcode Command Line Tools and Homebrew (macOS)
-- Python 3.10+
-- CMake 3.20+
-
-The project was developed on macOS against a native SITL build. Linux should work with the equivalent packages.
-
-## Setup
+Requirements: Xcode Command Line Tools and Homebrew (macOS), Python 3.10+, CMake 3.20+.
 
 ```bash
 brew install cmake
-
-# ArduPilot source (not tracked in this repo)
-git clone --recurse-submodules --shallow-submodules --depth 1 \
-    https://github.com/ArduPilot/ardupilot.git ardupilot
-
-# Python environment: SITL build tooling, pymavlink, matplotlib
-python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt
-
-# SITL copter build (~2 min)
+git clone --recurse-submodules --shallow-submodules --depth 1 https://github.com/ArduPilot/ardupilot.git ardupilot
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 source .venv/bin/activate
-cd ardupilot && ./waf configure --board sitl && ./waf copter && cd ..
-
-# MAVSDK v4.0.0 C++ library, built into third_party/mavsdk-install (~10 min)
-scripts/build_mavsdk.sh
-
-# Controller and unit tests (GoogleTest is fetched by CMake)
-cmake -S . -B build && cmake --build build -j
-(cd build && ctest)
+(cd ardupilot && ./waf configure --board sitl && ./waf copter)   # SITL, ~2 min
+scripts/build_mavsdk.sh                                          # MAVSDK into third_party/, ~10 min
+cmake -S . -B build && cmake --build build -j && (cd build && ctest)
 ```
 
-ArduPilot's `install-prereqs-mac.sh` isn't needed: the packages in `requirements.txt` are enough for the SITL build.
-
-## Running
-
-Start SITL. The `arducopter` binary sends MAVLink straight to two UDP ports, with no router in between:
+Run:
 
 ```bash
-scripts/run_sitl.sh --wipe        # --wipe resets parameters to defaults + sitl/guided_thrust.parm
+scripts/run_sitl.sh --wipe             # SITL: UDP 14550 (ground station), 14551 (controller)
+./build/altitude_control               # mission; settings in config/mission.conf, log in logs/flight.csv
+python scripts/plot.py logs/flight.csv # plot: altitude, climb rate, thrust
 ```
 
-| Endpoint | Use |
+Other tools:
+- `altitude_control --set key=value` overrides any config value.
+- `--run telemetry` and `--run open-loop` are bring-up checks.
+- `scripts/tune.py` runs gain sweeps; `scripts/flight_metrics.py` computes step-response metrics.
+- `scripts/fault_tests.py` runs fault injection.
+
+## How it works
+
+On every control tick (50 Hz) the program:
+
+1. Reads altitude and climb rate from `LOCAL_POSITION_NED`.
+2. Moves the altitude setpoint toward the target along a smooth trajectory, limited in speed and acceleration.
+3. **Outer loop (P):** converts the altitude error into a climb-rate setpoint.
+4. **Inner loop (PID):** converts the climb-rate error into a thrust correction.
+5. Sends `MOT_THST_HOVER` plus the correction as the thrust value.
+
+| Component | Role |
 |---|---|
-| `udp:127.0.0.1:14550` (SERIAL0) | ground station: QGroundControl connects automatically |
-| `udp:127.0.0.1:14551` (SERIAL1) | the controller and the Python test scripts |
+| `DroneInterface` | MAVSDK: telemetry, parameters, mode, arming, thrust commands |
+| `AltitudeController` | take-off phase + cascade above |
+| `PIDController` | derivative on measurement, filtered D, anti-windup, output limits |
+| `MissionRunner` | state machine, 50 Hz control loop, safety checks |
+| `DataLogger` | per-tick CSV log |
 
-Each port serves one client.
+**Take-off:** until the copter is 0.3 m above the ground, thrust is fixed at hover + 0.10, with the PID held in reset. The cascade then takes over from the current altitude and speed.
 
-`sitl/guided_thrust.parm` sets `GUID_OPTIONS 8` and `GUID_TIMEOUT 1`. Give SITL about 20 s after start: `LOCAL_POSITION_NED` is only sent once the EKF origin is set from GPS.
+**Safety:** any of these triggers LAND:
+- telemetry older than 0.2 s, or a loop stall over 0.5 s
+- an unexpected disarm
+- altitude above 15 m
+- a state timeout (60 s)
+- Ctrl+C
 
-Run the mission:
+If someone else changes the flight mode, the controller stops and leaves the vehicle to them. It refuses to start on an armed vehicle.
 
-```bash
-./build/altitude_control                       # full mission, config/mission.conf, log in logs/flight.csv
-./build/altitude_control --set vel_kp=0.5      # override any config value
-./build/altitude_control --run telemetry       # print altitude and mode, check the telemetry rate
-./build/altitude_control --run open-loop       # GUIDED, arm, fixed thrust up to 4 m, LAND
-```
+Exit codes: 0 done, 1 error, 3 released to the operator, 130 interrupted.
 
-Plot and evaluate a flight:
+## Results
 
-```bash
-source .venv/bin/activate
-python scripts/plot.py logs/flight.csv            # logs/flight.png: altitude, climb rate, thrust
-python scripts/flight_metrics.py logs/flight.csv  # overshoot, settling time, hold error
-python scripts/tune.py "vel_kp=0.5" "vel_kp=0.7"  # one mission per gain set, comparison table
-```
+Final run from wiped SITL parameters (`docs/`):
 
-Fault-injection tests (SITL running):
-
-```bash
-python scripts/fault_tests.py   # early_interrupt, armed_start, mode_change, stall, link_loss
-```
-
-`link_loss` puts a small UDP relay between SITL and the controller and drops all packets for 3 s. The ground-station link stays up, so the test can check that ArduPilot holds altitude during the outage.
-
-## Design notes
-
-These come from experiments in SITL (`scripts/risk_tests.py`) and from reading the ArduCopter source (`ModeGuided::angle_control_run`, `GCS_MAVLINK_Copter::handle_message_set_attitude_target`).
-
-- **Altitude:** `alt = -LOCAL_POSITION_NED.z`, `climb = -vz` (NED is z-down).
-- **`SET_ATTITUDE_TARGET`:** `type_mask = 7` ignores all body rates. ArduPilot rejects a mask that ignores only some of them. The quaternion is level, with the yaw captured at arming and held.
-- **Take-off with thrust only works.** Positive thrust releases ArduPilot's landed state. Liftoff comes about 3 s after arming (motor spool-up), and must happen within `DISARM_DELAY` (10 s).
-- **Take-off phase:** until the copter is 0.3 m above its arming altitude, thrust is fixed at `MOT_THST_HOVER + 0.10`, with the PID held in reset so nothing winds up on the ground. The cascade then takes over without a jump: the trajectory starts at the current altitude and climb rate.
-- **Hover thrust:** `MOT_THST_HOVER` (0.36–0.39, re-learned in flight) is only a feedforward. Thrust is very sensitive (about 25 m/s² per unit), so the climb-rate loop needs an integrator.
-- **Command stream gaps are dangerous:** until `GUID_TIMEOUT` expires, ArduPilot keeps applying the last thrust it received. After the timeout it levels out and holds altitude. The controller therefore sends a freshly computed thrust every tick from a single 50 Hz loop (no separate sender repeating stale values), and lands if the loop stalls for more than 0.5 s. `GUID_TIMEOUT 1` is a backstop on the autopilot side.
-- **Setpoint trajectory:** a plain rate-limited ramp overshot by about 0.5 m, because its speed feedforward drops to zero in one tick. The trapezoidal profile brakes early enough to arrive with zero speed.
-- **Telemetry streams are requested explicitly.** On SITL's SERIAL1 all default stream rates are 0, so the controller asks for every message it relies on: position at 50 Hz, attitude, SYS_STATUS, GPS, home, landed state. A MAVProxy router between SITL and the controller was dropped: it overrode the requested rates with 4 Hz, and after a stall its stream stayed bursty. On macOS the control thread runs at the `USER_INTERACTIVE` QoS class, because timer coalescing otherwise delays some ticks by up to 100 ms.
-- **MAVSDK v4:** `MavlinkPassthrough` is deprecated, so `SET_ATTITUDE_TARGET` and `DO_SET_MODE` go through its replacement, `MavlinkDirect`. Telemetry, Param and Action cover the rest. `Action::land()` sends `MAV_CMD_NAV_LAND`, which switches ArduCopter to LAND.
-
-## Tuning and results
-
-Tuned in SITL with `scripts/tune.py`, inner loop first, then outer:
-
-| Gain | Value | Notes |
-|---|---|---|
-| `vel_kp` | 0.7 | Thrust chatter (a limit cycle) starts around 2.0, so this is about 3× below it. |
-| `vel_ki` | 0.15 | Best hold error without extra overshoot. |
-| `vel_kd` | 0 | D increased overshoot. Thrust sets acceleration, so the climb-rate loop is essentially first order. |
-| `alt_kp` | 2.0 | Overshoot fell from 0.06 m at 0.7 to 0.02 m at 2.0. |
-
-The setpoint trajectory is limited to 1.5 m/s up, 1.0 m/s down and 0.7 m/s² acceleration.
+![Altitude, climb rate and thrust during the mission](docs/flight.png)
 
 | | Climb to 10 m | Descend to 5 m |
 |---|---|---|
-| Overshoot | 0.024 m | 0.026 m |
-| Settling time (±0.10 m) | 10.1 s after arming (incl. ~3 s spool-up) | 5.8 s |
-| Hold error, RMS / max | 0.001 / 0.004 m | 0.002 / 0.004 m |
+| Overshoot | 0.020 m | 0.024 m |
+| Settling (±0.10 m) | 10.1 s after arming (incl. ~3 s spool-up) | 5.8 s |
+| Hold error, RMS / max | 0.003 / 0.006 m | 0.002 / 0.005 m |
 
-## Project layout
+**Gains** (tuned in SITL, inner loop first):
+- `vel_kp` 0.7: a limit cycle starts at about 2.0.
+- `vel_ki` 0.15.
+- `vel_kd` 0: D only increased overshoot.
+- `alt_kp` 2.0.
 
-```
-CMakeLists.txt              C++ build (finds MAVSDK in third_party/mavsdk-install)
-config/mission.conf         mission and controller settings
-include/altctl/, src/       controller
-tests/                      unit tests: PID, and the cascade on a vertical-dynamics model
-requirements.txt            Python dependencies
-scripts/run_sitl.sh         SITL launcher (UDP 14550 / 14551)
-scripts/build_mavsdk.sh     local MAVSDK build
-scripts/plot.py             flight plot
-scripts/flight_metrics.py   step-response metrics from a flight log
-scripts/tune.py             automated gain sweeps in SITL
-scripts/fault_tests.py      fault-injection tests in SITL
-scripts/risk_tests.py       SITL experiments behind the design notes
-scripts/sitl_smoke_test.py  quick SITL check: GUIDED take-off to 5 m and land
-sitl/guided_thrust.parm     SITL parameters; sitl/run/ holds runtime state
-```
+## Design notes
 
-## Known issues
+Based on SITL experiments (`scripts/risk_tests.py`) and the ArduCopter source.
 
-- **Paths with spaces:** `sim_vehicle.py` crashes SITL (`PANIC: Failed to load defaults`), because it splits the `--defaults` argument. `scripts/run_sitl.sh` therefore runs the `arducopter` binary directly with relative paths to avoid it.
+- **Altitude:** `alt = -LOCAL_POSITION_NED.z` (NED is z-down).
+- **`type_mask = 7`:** ignores all body rates. ArduPilot rejects a mask that ignores only some of them.
+- **Command stream gaps are dangerous:** ArduPilot keeps applying the last thrust until `GUID_TIMEOUT` (set to 1 s), then holds altitude. That's why there is one loop sending fresh thrust every tick.
+- **`MOT_THST_HOVER`** is only a feedforward. The integrator absorbs the error.
+- **Trapezoidal setpoint trajectory:** a plain ramp overshot by about 0.5 m.
+- **Explicit streams:** SITL's SERIAL1 streams nothing by default, so the controller requests every message it uses. There's no MAVProxy router, because it overrode those rates.
+- **MAVSDK v4:** `MavlinkPassthrough` is deprecated, so `MavlinkDirect` sends `SET_ATTITUDE_TARGET` and `DO_SET_MODE`.
+
+## Limitations
+
+- **Tuned in noise-free SITL.** Real hardware needs lower gains and more filtering.
+- **Altitude only.** Horizontal drift is not corrected.
+- **Project paths containing spaces break `sim_vehicle.py`**, so `scripts/run_sitl.sh` starts `arducopter` directly.

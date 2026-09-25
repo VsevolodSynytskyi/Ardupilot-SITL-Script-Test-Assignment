@@ -7,7 +7,6 @@ namespace altctl {
 
 bool DataLogger::open(const std::string& path)
 {
-    path_ = path;
     const auto parent = std::filesystem::path(path).parent_path();
     if (!parent.empty()) {
         std::error_code ec;

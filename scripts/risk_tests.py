@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Stage 2 risk validation against ArduCopter SITL (throwaway test code, pymavlink).
+"""SITL experiments behind the controller design (pymavlink, exploratory test code).
 
 Tests, in order:
   zsign     - NED z/vz sign vs GLOBAL_POSITION_INT.relative_alt during a standard takeoff to 5 m
@@ -27,7 +27,7 @@ LOG_DIR = os.path.join(os.path.dirname(__file__), "..", "logs")
 
 
 def altitude_from_ned(z):
-    """The single NED -> altitude conversion (task 8): altitude up = -z_down."""
+    """NED -> altitude: altitude up = -z_down."""
     return -z
 
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Stage 1 smoke test: GUID_OPTIONS readback + standard GUIDED takeoff to 5 m, then LAND.
+"""SITL smoke test: GUID_OPTIONS readback + standard GUIDED takeoff to 5 m, then LAND.
 
 Equivalent to the MAVProxy sequence `mode guided; arm throttle; takeoff 5`.
 """

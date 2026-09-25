@@ -146,7 +146,7 @@ def test_mode_change():
     rc = c.finish()
     ok = check("exit code 3 (released)", rc == 3, f"rc={rc}")
     ok &= check("no LAND commanded", not any("-> LAND" in l for l in c.lines))
-    hb = m.recv_match(type="HEARTBEAT", blocking=True, timeout=3)
+    m.recv_match(type="HEARTBEAT", blocking=True, timeout=3)  # refreshes m.flightmode
     ok &= check("vehicle still in LOITER", m.flightmode == "LOITER", m.flightmode)
     print("   ", "\n    ".join(c.mission_log()[-3:]))
     m.set_mode("LAND")  # clean up

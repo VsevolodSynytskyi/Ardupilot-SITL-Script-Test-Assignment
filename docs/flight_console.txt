@@ -1,0 +1,83 @@
+[drone] connected to system 1 via udpin://0.0.0.0:14551
+[main] logging to docs/flight.csv
+[mission] INIT -> SET_PARAMS
+[mission] GUID_OPTIONS=8 MOT_THST_HOVER=0.390 GUID_TIMEOUT=1.0 s
+[ap] info: EKF3 IMU0 initialised
+[ap] info: EKF3 IMU1 initialised
+[ap] info: AHRS: EKF3 active
+[ap] info: EKF3 IMU0 tilt alignment complete
+[ap] info: EKF3 IMU1 tilt alignment complete
+[ap] info: EKF3 IMU0 MAG0 initial yaw alignment complete
+[ap] info: EKF3 IMU1 MAG0 initial yaw alignment complete
+[ap] info: GPS 1: probing for u-blox at 230400 baud
+[ap] info: GPS 1: detected u-blox
+[ap] info: EKF3 IMU0 origin set
+[ap] info: Field Elevation Set: 584m
+[ap] info: EKF3 IMU1 origin set
+[mission] waiting for telemetry: LOCAL_POSITION_NED at 0.0 Hz
+[mission] waiting for telemetry: LOCAL_POSITION_NED at 0.0 Hz
+[mission] waiting for telemetry: LOCAL_POSITION_NED at 0.0 Hz
+[mission] waiting for telemetry: LOCAL_POSITION_NED at 0.0 Hz
+[ap] info: EKF3 IMU0 is using GPS
+[ap] info: EKF3 IMU1 is using GPS
+[mission] telemetry rate 28.6 Hz
+[mission] SET_PARAMS -> SET_GUIDED
+[mission] SET_GUIDED -> ARM
+[mission] ARM -> CLIMB_TO_HIGH: streaming thrust
+[ap] info: Arming motors
+[ctl] t=  1.0s CLIMB_TO_HIGH  target=10.00 sp=-0.00 alt=-0.00 climb=-0.00 thrust=0.490 i=+0.000
+[ctl] t=  2.0s CLIMB_TO_HIGH  target=10.00 sp=-0.00 alt=-0.00 climb=-0.00 thrust=0.490 i=+0.000
+[ctl] t=  3.0s CLIMB_TO_HIGH  target=10.00 sp= 0.13 alt= 0.13 climb=+0.34 thrust=0.490 i=+0.000
+[ctl] t=  4.0s CLIMB_TO_HIGH  target=10.00 sp= 1.53 alt= 1.52 climb=+1.51 thrust=0.399 i=-0.003
+[ap] info: EKF3 IMU0 MAG0 in-flight yaw alignment complete
+[ap] info: EKF3 IMU1 MAG0 in-flight yaw alignment complete
+[ctl] t=  5.0s CLIMB_TO_HIGH  target=10.00 sp= 3.03 alt= 3.03 climb=+1.46 thrust=0.416 i=-0.002
+[ctl] t=  6.0s CLIMB_TO_HIGH  target=10.00 sp= 4.54 alt= 4.57 climb=+1.46 thrust=0.379 i=-0.002
+[ctl] t=  7.0s CLIMB_TO_HIGH  target=10.00 sp= 6.04 alt= 6.03 climb=+1.49 thrust=0.397 i=-0.001
+[ctl] t=  8.0s CLIMB_TO_HIGH  target=10.00 sp= 7.53 alt= 7.56 climb=+1.51 thrust=0.347 i=-0.000
+[ctl] t=  9.0s CLIMB_TO_HIGH  target=10.00 sp= 8.97 alt= 8.98 climb=+1.23 thrust=0.370 i=-0.002
+[ctl] t= 10.0s CLIMB_TO_HIGH  target=10.00 sp= 9.83 alt= 9.84 climb=+0.51 thrust=0.351 i=-0.009
+[ctl] t= 11.0s CLIMB_TO_HIGH  target=10.00 sp=10.00 alt=10.01 climb=-0.02 thrust=0.377 i=-0.013
+[mission] CLIMB_TO_HIGH -> HOLD_HIGH: |err|<0.25 m for 2.0 s (after 11.8 s)
+[ctl] t= 12.0s HOLD_HIGH      target=10.00 sp=10.00 alt= 9.99 climb=+0.01 thrust=0.374 i=-0.014
+[ctl] t= 13.0s HOLD_HIGH      target=10.00 sp=10.00 alt=10.00 climb=+0.01 thrust=0.374 i=-0.014
+[ctl] t= 14.0s HOLD_HIGH      target=10.00 sp=10.00 alt=10.00 climb=+0.01 thrust=0.374 i=-0.014
+[ctl] t= 15.0s HOLD_HIGH      target=10.00 sp=10.00 alt=10.00 climb=+0.00 thrust=0.374 i=-0.015
+[ctl] t= 16.0s HOLD_HIGH      target=10.00 sp=10.00 alt=10.00 climb=+0.00 thrust=0.374 i=-0.015
+[ctl] t= 17.0s HOLD_HIGH      target=10.00 sp=10.00 alt=10.00 climb=-0.00 thrust=0.374 i=-0.015
+[ctl] t= 18.0s HOLD_HIGH      target=10.00 sp=10.00 alt=10.00 climb=-0.00 thrust=0.374 i=-0.015
+[ctl] t= 19.0s HOLD_HIGH      target=10.00 sp=10.00 alt=10.00 climb=-0.00 thrust=0.374 i=-0.015
+[ctl] t= 20.0s HOLD_HIGH      target=10.00 sp=10.00 alt=10.00 climb=-0.00 thrust=0.374 i=-0.015
+[ctl] t= 21.0s HOLD_HIGH      target=10.00 sp=10.00 alt=10.00 climb=-0.00 thrust=0.374 i=-0.016
+[mission] HOLD_HIGH -> DESCEND_TO_LOW: held 10.0 s
+[ctl] t= 22.0s DESCEND_TO_LOW target= 5.00 sp= 9.99 alt=10.00 climb=-0.08 thrust=0.340 i=-0.017
+[ctl] t= 23.0s DESCEND_TO_LOW target= 5.00 sp= 9.52 alt= 9.54 climb=-0.81 thrust=0.334 i=-0.023
+[ctl] t= 24.0s DESCEND_TO_LOW target= 5.00 sp= 8.54 alt= 8.55 climb=-1.01 thrust=0.366 i=-0.025
+[ctl] t= 25.0s DESCEND_TO_LOW target= 5.00 sp= 7.54 alt= 7.54 climb=-1.00 thrust=0.367 i=-0.025
+[ctl] t= 26.0s DESCEND_TO_LOW target= 5.00 sp= 6.54 alt= 6.54 climb=-1.00 thrust=0.368 i=-0.025
+[ctl] t= 27.0s DESCEND_TO_LOW target= 5.00 sp= 5.55 alt= 5.55 climb=-0.92 thrust=0.391 i=-0.024
+[ctl] t= 28.0s DESCEND_TO_LOW target= 5.00 sp= 5.02 alt= 5.00 climb=-0.18 thrust=0.404 i=-0.018
+[ctl] t= 29.0s DESCEND_TO_LOW target= 5.00 sp= 5.00 alt= 5.00 climb=+0.00 thrust=0.373 i=-0.017
+[mission] DESCEND_TO_LOW -> HOLD_LOW: |err|<0.25 m for 2.0 s (after 7.5 s)
+[ctl] t= 30.0s HOLD_LOW       target= 5.00 sp= 5.00 alt= 5.01 climb=-0.01 thrust=0.374 i=-0.017
+[ctl] t= 31.0s HOLD_LOW       target= 5.00 sp= 5.00 alt= 5.00 climb=-0.01 thrust=0.374 i=-0.017
+[ctl] t= 32.0s HOLD_LOW       target= 5.00 sp= 5.00 alt= 5.00 climb=-0.00 thrust=0.374 i=-0.016
+[ctl] t= 33.0s HOLD_LOW       target= 5.00 sp= 5.00 alt= 5.00 climb=-0.00 thrust=0.374 i=-0.016
+[ctl] t= 34.0s HOLD_LOW       target= 5.00 sp= 5.00 alt= 5.00 climb=-0.00 thrust=0.374 i=-0.016
+[ctl] t= 35.0s HOLD_LOW       target= 5.00 sp= 5.00 alt= 5.00 climb=-0.00 thrust=0.374 i=-0.016
+[ctl] t= 36.0s HOLD_LOW       target= 5.00 sp= 5.00 alt= 5.00 climb=+0.00 thrust=0.374 i=-0.016
+[ctl] t= 37.0s HOLD_LOW       target= 5.00 sp= 5.00 alt= 5.00 climb=-0.00 thrust=0.374 i=-0.016
+[ctl] t= 38.0s HOLD_LOW       target= 5.00 sp= 5.00 alt= 5.00 climb=-0.00 thrust=0.374 i=-0.016
+[ctl] t= 39.0s HOLD_LOW       target= 5.00 sp= 5.00 alt= 5.00 climb=+0.00 thrust=0.374 i=-0.016
+[mission] 1969 commands, 50.0 Hz, max loop dt 48.2 ms
+[mission] HOLD_LOW -> LAND: switching to LAND, thrust stream stopped
+[mission] landing: alt=4.16 m
+[mission] landing: alt=3.15 m
+[mission] landing: alt=2.15 m
+[mission] landing: alt=1.14 m
+[mission] landing: alt=0.12 m
+[ap] info: SIM Hit ground at 0.496697 m/s
+[mission] landing: alt=0.02 m
+[ap] info: Disarming motors
+[mission] landed and disarmed
+[mission] LAND -> DONE: mission complete

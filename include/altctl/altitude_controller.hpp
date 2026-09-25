@@ -29,7 +29,6 @@ public:
 
     Output update(double target_alt_m, double alt_m, double climb_ms, double dt);
 
-    double hover_thrust() const { return hover_thrust_; }
 
 private:
     Config cfg_;
