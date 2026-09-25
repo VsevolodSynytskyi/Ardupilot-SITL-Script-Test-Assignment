@@ -29,13 +29,14 @@ struct Config {
 
     // Outer loop: altitude error -> climb-rate setpoint
     double alt_kp = 1.0;              // (m/s) per m
-    double max_climb_ms = 2.0;
-    double max_descent_ms = 1.0;
-    double setpoint_rate_up_ms = 2.0;   // altitude setpoint ramp
+    double max_climb_ms = 2.5;
+    double max_descent_ms = 1.5;
+    double setpoint_rate_up_ms = 1.5;   // altitude setpoint ramp
     double setpoint_rate_down_ms = 1.0;
+    double setpoint_accel_mss = 0.7;    // setpoint acceleration/braking
 
     // Inner loop: climb-rate error -> thrust correction around hover
-    PidGains vel{0.05, 0.02, 0.0, 5.0, 0.15, -0.3, 0.3};
+    PidGains vel{0.15, 0.05, 0.0, 5.0, 0.15, -0.3, 0.3};
     double thrust_min = 0.10;
     double thrust_max = 0.80;
     double liftoff_alt_m = 0.3;       // integrator frozen below this altitude

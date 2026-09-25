@@ -33,8 +33,9 @@ cd ardupilot && ./waf configure --board sitl && ./waf copter && cd ..
 # MAVSDK v4.0.0 C++ library, built into third_party/mavsdk-install (~10 min, ignored by git)
 scripts/build_mavsdk.sh
 
-# Controller
+# Controller + unit tests (GoogleTest is fetched by CMake)
 cmake -S . -B build && cmake --build build -j
+(cd build && ctest)
 ```
 
 This skips ArduPilot's `install-prereqs-mac.sh`, which installs globally and edits `~/.zshrc`. The SITL build only needs the packages in `requirements.txt`. The ARM toolchain, wxPython and ccache are not required.
@@ -85,6 +86,7 @@ If the project path contains a space:
 CMakeLists.txt            C++ build (finds MAVSDK in third_party/mavsdk-install)
 config/mission.conf       mission and controller settings
 include/altctl/, src/     C++ controller
+tests/                    unit tests (PID, cascade on a vertical-dynamics model)
 requirements.txt          Python dependencies (build tooling, MAVProxy, pymavlink)
 scripts/run_sitl.sh       SITL + MAVProxy router launcher
 scripts/build_mavsdk.sh   builds MAVSDK locally
@@ -102,5 +104,6 @@ These come from SITL experiments (`scripts/risk_tests.py`) and the ArduCopter so
 - **Takeoff:** thrust-only works from the ground. Positive thrust releases ArduPilot's landed state. Liftoff comes ~3 s after arming (motor spool-up) and must happen within `DISARM_DELAY` (10 s).
 - **Hover thrust:** `MOT_THST_HOVER` (~0.36–0.39, re-learned in flight) is only a feedforward. Thrust is very sensitive (≈25 m/s² per unit), so the velocity loop needs an integrator.
 - **Stream gaps:** until `GUID_TIMEOUT` expires, ArduPilot keeps applying the **last thrust**, so a stall is dangerous. After the timeout it levels out and holds altitude. We send at 50 Hz, switch to LAND if our loop stalls > 0.5 s, and set `GUID_TIMEOUT 1` as an autopilot-side backstop.
+- **Controller:** a cascade. A trapezoidal setpoint trajectory (rate, acceleration and braking limited) feeds an outer P loop on altitude, with the trajectory velocity as feedforward. That gives a climb-rate setpoint for an inner PID on climb rate, whose output is a correction added to `MOT_THST_HOVER`. The PID uses derivative on measurement, a low-pass filtered D, clamping anti-windup, and an integrator frozen below 0.3 m (on the ground). A plain rate-limited ramp overshot ~0.5 m on the model, because the feedforward stops abruptly.
 - **MAVProxy router:** runs with `--streamrate=-1`. Otherwise it keeps re-requesting 4 Hz stream rates and overrides the 50 Hz the controller asks for.
 - **MAVSDK v4:** `MavlinkPassthrough` is deprecated. `SET_ATTITUDE_TARGET` and `DO_SET_MODE` go through its replacement, `MavlinkDirect`.

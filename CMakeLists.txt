@@ -15,6 +15,8 @@ find_package(MAVSDK REQUIRED)
 # Controller logic without MAVSDK: unit-testable in isolation
 add_library(altctl_core STATIC
   src/config.cpp
+  src/pid_controller.cpp
+  src/altitude_controller.cpp
 )
 target_include_directories(altctl_core PUBLIC include)
 target_compile_options(altctl_core PRIVATE -Wall -Wextra -Wpedantic)
@@ -30,4 +32,21 @@ target_compile_options(altitude_control PRIVATE -Wall -Wextra)
 set_target_properties(altitude_control PROPERTIES
   BUILD_RPATH "${CMAKE_CURRENT_SOURCE_DIR}/third_party/mavsdk-install/lib")
 
-# Unit tests (GoogleTest via FetchContent) are added in Stage 7 together with the PID code.
+option(BUILD_TESTS "Build unit tests" ON)
+if(BUILD_TESTS)
+  include(FetchContent)
+  FetchContent_Declare(googletest
+    URL https://github.com/google/googletest/archive/refs/tags/v1.15.2.tar.gz
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+  set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
+  FetchContent_MakeAvailable(googletest)
+
+  enable_testing()
+  add_executable(unit_tests
+    tests/test_pid_controller.cpp
+    tests/test_altitude_controller.cpp
+  )
+  target_link_libraries(unit_tests PRIVATE altctl_core GTest::gtest_main)
+  include(GoogleTest)
+  gtest_discover_tests(unit_tests)
+endif()

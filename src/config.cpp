@@ -35,6 +35,7 @@ void Config::set(const std::string& key, const std::string& value)
         {"max_descent_ms", &max_descent_ms},
         {"setpoint_rate_up_ms", &setpoint_rate_up_ms},
         {"setpoint_rate_down_ms", &setpoint_rate_down_ms},
+        {"setpoint_accel_mss", &setpoint_accel_mss},
         {"vel_kp", &vel.kp},
         {"vel_ki", &vel.ki},
         {"vel_kd", &vel.kd},
