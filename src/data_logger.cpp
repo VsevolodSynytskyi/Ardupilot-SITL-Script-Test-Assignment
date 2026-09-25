@@ -34,6 +34,9 @@ void DataLogger::write(const Row& r)
                   r.ctl.thrust, r.ctl.vel_terms.p, r.ctl.vel_terms.i, r.ctl.vel_terms.d,
                   r.ctl.integrator_frozen ? 1 : 0, r.dt_s);
     out_ << line;
+    if (++rows_ % 50 == 0) {
+        out_.flush();  // keep the log useful if the process dies
+    }
 }
 
 }  // namespace altctl

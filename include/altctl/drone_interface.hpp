@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -50,8 +51,11 @@ public:
     std::optional<int32_t> get_param_int(const std::string& name);
     std::optional<float> get_param_float(const std::string& name);
 
-    bool wait_ready(std::chrono::seconds timeout);  // EKF position + home, armable
+    // EKF position + home + pre-arm checks; `cancel` is polled (e.g. Ctrl+C).
+    bool wait_ready(std::chrono::seconds timeout, const std::function<bool()>& cancel = {});
     bool set_mode(CopterMode mode, std::chrono::seconds timeout);
+    // Measured LOCAL_POSITION_NED rate over `window`; re-requests the 50 Hz rate first if asked.
+    double measure_position_rate(std::chrono::milliseconds window, bool request_rate = false);
     bool arm();
     bool land();
 

@@ -20,10 +20,14 @@ double seconds(Clock::duration d)
     return std::chrono::duration<double>(d).count();
 }
 
-// Telemetry older than this during flight is treated as a lost link.
-constexpr double kTelemetryStaleS = 0.5;
+// Telemetry older than this during flight is treated as a lost link (10 samples at 50 Hz).
+constexpr double kTelemetryStaleS = 0.2;
+// Minimum LOCAL_POSITION_NED rate required before arming.
+constexpr double kMinTelemetryRateHz = 25.0;
 // After arming, ArduPilot may briefly report disarmed; ignore that for this long.
 constexpr double kArmGraceS = 1.0;
+// How long LAND is retried (e.g. while the link is down) before giving up.
+constexpr double kLandCommandRetryS = 30.0;
 
 }  // namespace
 
@@ -74,6 +78,10 @@ int MissionRunner::run()
         return 1;
     }
     const auto result = fly();
+    if (result == FlightResult::ReleasedToOperator) {
+        std::printf("[mission] thrust stream stopped; vehicle left to the operator\n");
+        return 3;
+    }
     const bool landed = land();
     if (result == FlightResult::Completed && landed) {
         transition(MissionState::Done, "mission complete");
@@ -84,6 +92,11 @@ int MissionRunner::run()
 
 bool MissionRunner::prepare()
 {
+    if (drone_.state().armed) {
+        // Mission and take-off logic assume a vehicle on the ground (ground reference, take-off
+        // phase); never take over an armed vehicle.
+        return fail("vehicle is already armed; land and disarm it first");
+    }
     transition(MissionState::SetParams, "");
     auto guid = drone_.get_param_int("GUID_OPTIONS");
     if (!guid || (*guid & 8) == 0) {
@@ -105,12 +118,26 @@ bool MissionRunner::prepare()
     std::printf("[mission] GUID_OPTIONS=%d MOT_THST_HOVER=%.3f GUID_TIMEOUT=%.1f s\n", *guid,
                 hover_thrust_, guid_timeout ? *guid_timeout : -1.0f);
 
-    if (!drone_.wait_ready(std::chrono::seconds(90))) {
-        return fail("vehicle not ready (EKF / pre-arm)");
+    if (!drone_.wait_ready(std::chrono::seconds(90), [this] { return stop_requested_.load(); })) {
+        return fail(stop_requested_ ? "interrupted by user" : "vehicle not ready (EKF / pre-arm)");
+    }
+
+    // The controller needs fresh altitude every tick; never arm on a slow telemetry stream
+    // (seen in SITL after a router stall: ~3 Hz, bang-bang thrust). Right after SITL start the
+    // stream may not flow yet even though the health flags are OK, so wait for it.
+    double rate = drone_.measure_position_rate(std::chrono::milliseconds(1000));
+    const auto rate_deadline = Clock::now() + std::chrono::seconds(60);
+    while (rate < kMinTelemetryRateHz && Clock::now() < rate_deadline && !stop_requested_) {
+        std::printf("[mission] waiting for telemetry: LOCAL_POSITION_NED at %.1f Hz\n", rate);
+        rate = drone_.measure_position_rate(std::chrono::milliseconds(1500), true);
     }
     if (stop_requested_) {
-        return fail("interrupted");
+        return fail("interrupted by user");
     }
+    if (rate < kMinTelemetryRateHz) {
+        return fail("telemetry too slow for control (" + std::to_string(rate) + " Hz)");
+    }
+    std::printf("[mission] telemetry rate %.1f Hz\n", rate);
 
     transition(MissionState::SetGuided, "");
     if (!drone_.set_mode(CopterMode::Guided, std::chrono::seconds(5))) {
@@ -118,6 +145,9 @@ bool MissionRunner::prepare()
     }
 
     transition(MissionState::Arm, "");
+    if (stop_requested_) {
+        return fail("interrupted by user");
+    }
     if (!drone_.arm()) {
         return fail("arming rejected");
     }
@@ -141,6 +171,7 @@ MissionRunner::FlightResult MissionRunner::fly()
     auto t_in_tol = Clock::time_point{};  // since when |error| < tolerance (0 = not in tolerance)
     auto last_tick = t_start;
     auto next_tick = t_start;
+    auto last_send_ok = t_start;
     uint64_t ticks = 0;
     double max_dt = 0.0;
 
@@ -163,16 +194,23 @@ MissionRunner::FlightResult MissionRunner::fly()
             return FlightResult::Failed;
         }
         if (seconds(now - s.last_position_update) > kTelemetryStaleS) {
-            fail("telemetry stale (no LOCAL_POSITION_NED)");
+            fail("telemetry stale (no LOCAL_POSITION_NED for " +
+                 std::to_string(seconds(now - s.last_position_update)) + " s)");
             return FlightResult::Failed;
         }
         if (!s.armed && seconds(now - t_start) > kArmGraceS) {
             fail("vehicle disarmed unexpectedly");
             return FlightResult::Failed;
         }
-        if (s.custom_mode != static_cast<uint32_t>(CopterMode::Guided)) {
-            fail("mode changed externally (custom_mode=" + std::to_string(s.custom_mode) + ")");
+        if (seconds(now - last_send_ok) > cfg_.stream_watchdog_s) {
+            fail("thrust commands failing to send");
             return FlightResult::Failed;
+        }
+        if (s.custom_mode != static_cast<uint32_t>(CopterMode::Guided)) {
+            // Someone else (operator / GCS) changed the mode: do not fight them.
+            transition(MissionState::Error, "mode changed externally (custom_mode=" +
+                                                std::to_string(s.custom_mode) + ")");
+            return FlightResult::ReleasedToOperator;
         }
         if (s.alt_m > max_alt) {
             fail("altitude " + std::to_string(s.alt_m) + " m above limit");
@@ -238,7 +276,9 @@ MissionRunner::FlightResult MissionRunner::fly()
                 ? cfg_.alt_high_m
                 : cfg_.alt_low_m;
         const auto out = ctl.update(ground_alt + target_now, s.alt_m, s.climb_ms, ticks ? dt : 0.0);
-        drone_.send_thrust(out.thrust, yaw_hold);
+        if (drone_.send_thrust(out.thrust, yaw_hold)) {
+            last_send_ok = now;
+        }
         ++ticks;
 
         auto logged = out;  // log altitudes relative to the take-off point
@@ -265,12 +305,21 @@ MissionRunner::FlightResult MissionRunner::fly()
 bool MissionRunner::land()
 {
     transition(MissionState::Land, "switching to LAND, thrust stream stopped");
-    bool commanded = drone_.land();
-    if (!commanded) {
-        commanded = drone_.set_mode(CopterMode::Land, std::chrono::seconds(5));
+    // Retry: after a link loss the command only gets through once the link is back.
+    // Meanwhile ArduPilot holds altitude (GUID_TIMEOUT expired with no thrust stream).
+    const auto retry_until = Clock::now() + std::chrono::duration_cast<Clock::duration>(
+                                                std::chrono::duration<double>(kLandCommandRetryS));
+    bool commanded = false;
+    while (!commanded && Clock::now() < retry_until) {
+        commanded = drone_.land() || drone_.set_mode(CopterMode::Land, std::chrono::seconds(3));
+        if (drone_.state().custom_mode == static_cast<uint32_t>(CopterMode::Land)) {
+            commanded = true;
+        }
     }
     if (!commanded) {
-        std::printf("[mission] could not command LAND\n");
+        std::printf("[mission] could not command LAND for %.0f s; vehicle is holding altitude in "
+                    "GUIDED, take over from the GCS\n",
+                    kLandCommandRetryS);
         return false;
     }
     const auto deadline = Clock::now() + std::chrono::seconds(120);

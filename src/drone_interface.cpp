@@ -1,10 +1,13 @@
 #include "altctl/drone_interface.hpp"
 
+#include <atomic>
 #include <cmath>
+#include <cstring>
 #include <cstdio>
 #include <iostream>
 #include <thread>
 
+#include <mavsdk/log_callback.hpp>
 #include <mavsdk/mavsdk.hpp>
 #include <mavsdk/plugins/action/action.hpp>
 #include <mavsdk/plugins/mavlink_direct/mavlink_direct.hpp>
@@ -40,9 +43,39 @@ std::optional<double> json_number(const std::string& json, const std::string& ke
     }
 }
 
+std::atomic<bool> g_link_up{false};
+
+// Console filter for MAVSDK's own logging: autopilot STATUSTEXT messages become "[ap]" lines,
+// MAVSDK debug/info chatter is dropped, warnings and errors are kept.
+bool filter_mavsdk_log(mavsdk::log::Level level, const std::string& message, const std::string&, int)
+{
+    constexpr const char* kStatusText = "MAVLink: ";
+    if (message.rfind(kStatusText, 0) == 0) {
+        std::printf("[ap] %s\n", message.c_str() + std::strlen(kStatusText));
+        std::fflush(stdout);
+        return true;
+    }
+    if (level == mavsdk::log::Level::Debug || level == mavsdk::log::Level::Info) {
+        return true;
+    }
+    // DO_SET_MODE is sent through MavlinkDirect, so MAVSDK's command sender does not know the ack.
+    if (message.find("ack for not-existing command") != std::string::npos) {
+        return true;
+    }
+    // MAVSDK sends a heartbeat before the UDP peer is known; harmless until the link is up.
+    if (!g_link_up && message.find("Sending message failed") != std::string::npos) {
+        return true;
+    }
+    std::fprintf(stderr, "[mavsdk] %s\n", message.c_str());
+    return true;
+}
+
 }  // namespace
 
-DroneInterface::DroneInterface(std::string connection_url) : url_(std::move(connection_url)) {}
+DroneInterface::DroneInterface(std::string connection_url) : url_(std::move(connection_url))
+{
+    mavsdk::log::subscribe(filter_mavsdk_log);
+}
 
 DroneInterface::~DroneInterface()
 {
@@ -73,6 +106,7 @@ bool DroneInterface::connect(std::chrono::seconds timeout)
         return false;
     }
     system_ = *system;
+    g_link_up = true;
     telemetry_ = std::make_unique<mavsdk::Telemetry>(system_);
     action_ = std::make_unique<mavsdk::Action>(system_);
     param_ = std::make_unique<mavsdk::Param>(system_);
@@ -118,6 +152,17 @@ bool DroneInterface::connect(std::chrono::seconds timeout)
             state_.last_heartbeat = std::chrono::steady_clock::now();
         }
     });
+    {
+        // Seed the snapshot so the first state() after connect() is meaningful.
+        std::lock_guard<std::mutex> lock(mutex_);
+        state_.armed = telemetry_->armed();
+        state_.in_air = telemetry_->in_air();
+    }
+    const auto hb_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    while (state().last_heartbeat == std::chrono::steady_clock::time_point{} &&
+           std::chrono::steady_clock::now() < hb_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
     std::cout << "[drone] connected to system " << static_cast<int>(target_sysid) << " via "
               << url_ << "\n";
     return true;
@@ -159,10 +204,13 @@ std::optional<float> DroneInterface::get_param_float(const std::string& name)
     return value;
 }
 
-bool DroneInterface::wait_ready(std::chrono::seconds timeout)
+bool DroneInterface::wait_ready(std::chrono::seconds timeout, const std::function<bool()>& cancel)
 {
     const auto deadline = std::chrono::steady_clock::now() + timeout;
     while (std::chrono::steady_clock::now() < deadline) {
+        if (cancel && cancel()) {
+            return false;
+        }
         const auto h = telemetry_->health();
         if (h.is_local_position_ok && h.is_global_position_ok && h.is_home_position_ok &&
             h.is_armable) {
@@ -175,6 +223,19 @@ bool DroneInterface::wait_ready(std::chrono::seconds timeout)
               << " global_pos=" << h.is_global_position_ok << " home=" << h.is_home_position_ok
               << " armable(pre-arm)=" << h.is_armable << "\n";
     return false;
+}
+
+double DroneInterface::measure_position_rate(std::chrono::milliseconds window, bool request_rate)
+{
+    if (request_rate) {
+        telemetry_->set_rate_position_velocity_ned(kTelemetryRateHz);
+    }
+    const auto n0 = state().position_updates;
+    const auto t0 = std::chrono::steady_clock::now();
+    std::this_thread::sleep_for(window);
+    const double elapsed =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    return (state().position_updates - n0) / elapsed;
 }
 
 bool DroneInterface::set_mode(CopterMode mode, std::chrono::seconds timeout)

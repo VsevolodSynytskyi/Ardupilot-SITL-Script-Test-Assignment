@@ -1,5 +1,6 @@
 #include <atomic>
 #include <csignal>
+#include <cstdlib>
 #include <iostream>
 #include <string>
 
@@ -13,7 +14,13 @@ namespace {
 
 std::atomic<bool> g_stop{false};
 
-void on_signal(int) { g_stop = true; }
+// First Ctrl+C: stop the mission and land. Second Ctrl+C: quit immediately.
+void on_signal(int)
+{
+    if (g_stop.exchange(true)) {
+        std::_Exit(130);
+    }
+}
 
 void usage(const char* argv0)
 {
@@ -62,6 +69,8 @@ int main(int argc, char** argv)
 
     std::signal(SIGINT, on_signal);
     std::signal(SIGTERM, on_signal);
+    // A closed stdout (e.g. the parent script exited) must not kill the process mid-flight.
+    std::signal(SIGPIPE, SIG_IGN);
 
     altctl::DroneInterface drone(cfg.connection_url);
     if (!drone.connect(std::chrono::seconds(20))) {

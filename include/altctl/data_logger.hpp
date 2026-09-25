@@ -27,6 +27,7 @@ public:
 private:
     std::ofstream out_;
     std::string path_;
+    unsigned long rows_ = 0;
 };
 
 }  // namespace altctl
