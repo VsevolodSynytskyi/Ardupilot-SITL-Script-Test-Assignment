@@ -16,23 +16,38 @@ A C++ program that controls the altitude of an ArduCopter in SITL using thrust c
 
 Requirements: Xcode Command Line Tools and Homebrew (macOS), Python 3.10+, CMake 3.20+.
 
+Set up once, from the project root. The SITL build takes about 2 min and the MAVSDK build about 10 min:
+
 ```bash
 brew install cmake
 git clone --recurse-submodules --shallow-submodules --depth 1 https://github.com/ArduPilot/ardupilot.git ardupilot
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 source .venv/bin/activate
-(cd ardupilot && ./waf configure --board sitl && ./waf copter)   # SITL, ~2 min
-scripts/build_mavsdk.sh                                          # MAVSDK into third_party/, ~10 min
+(cd ardupilot && ./waf configure --board sitl && ./waf copter)
+scripts/build_mavsdk.sh
 cmake -S . -B build && cmake --build build -j && (cd build && ctest)
 ```
 
-Run:
+Run it, with each step in its own terminal, from the project root:
 
-```bash
-scripts/run_sitl.sh --wipe             # SITL: UDP 14550 (ground station), 14551 (controller)
-./build/altitude_control               # mission; settings in config/mission.conf, log in logs/flight.csv
-python scripts/plot.py logs/flight.csv # plot: altitude, climb rate, thrust
-```
+1. Start SITL and leave it running. It sends MAVLink to UDP 14550 (ground station, e.g. QGroundControl) and UDP 14551 (controller).
+
+   ```bash
+   scripts/run_sitl.sh --wipe
+   ```
+
+2. Run the mission. Settings are in `config/mission.conf`, and the flight log goes to `logs/flight.csv`.
+
+   ```bash
+   ./build/altitude_control
+   ```
+
+3. After the flight, plot altitude, climb rate and thrust to `logs/flight.png`:
+
+   ```bash
+   source .venv/bin/activate
+   python scripts/plot.py logs/flight.csv
+   ```
 
 Other tools:
 - `altitude_control --set key=value` overrides any config value.
